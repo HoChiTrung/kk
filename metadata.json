@@ -1,0 +1,6 @@
+{
+  "name": "FitTrack Pro - Quản lý Chỉ số Sức khỏe Học viên",
+  "description": "Hệ thống quản lý và theo dõi 10 chỉ số sức khỏe sinh học học viên, phân tích tiến trình, tính điểm Health Score, trợ lý AI và báo cáo định kỳ cho HLV & Học viên.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
