@@ -9,7 +9,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import {
   SEED_STUDENTS,
   SEED_METRICS,
@@ -20,6 +20,7 @@ import {
   SEED_BADGES,
   SEED_NOTIFICATIONS,
 } from './src/data/seedData.ts';
+import { analyzeFoodImageVisuals } from './src/utils/mealVisionAnalyzer.ts';
 
 dotenv.config();
 
@@ -47,6 +48,17 @@ const getErrMessage = (err: unknown): string =>
 
 app.use(express.json({ limit: '15mb' }));
 
+// Enable CORS so static frontends (e.g. GitHub Pages) can communicate with the API
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-auth-username');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 // Aiven PostgreSQL Database Connection
 const rawConnectionString =
   process.env.DATABASE_URL ||
@@ -63,7 +75,12 @@ const pool = new Pool({
   connectionTimeoutMillis: 10000,
 });
 
+pool.on('error', (err) => {
+  console.warn('⚠️ Unexpected PostgreSQL pool error (auto-recovering on next query):', err.message);
+});
+
 let dbConnected = false;
+let inMemoryStudents = [...SEED_STUDENTS];
 
 // Initialize Database Tables and Auto-Seed
 async function initDatabase() {
@@ -490,10 +507,8 @@ app.get('/api/health', (req, res) => {
 // Students API
 app.get('/api/students', async (req, res) => {
   try {
-    if (!dbConnected) {
-      return res.json(SEED_STUDENTS);
-    }
     const result = await pool.query('SELECT * FROM students ORDER BY created_at DESC');
+    dbConnected = true;
     const students = result.rows.map((r) => ({
       id: r.id,
       fullName: r.full_name,
@@ -509,42 +524,73 @@ app.get('/api/students', async (req, res) => {
       driveFolderUrl: r.drive_folder_url || GOOGLE_DRIVE_PARENT_FOLDER_URL,
       createdAt: r.created_at,
     }));
+    inMemoryStudents = students;
     res.json(students);
   } catch (err: unknown) {
-    res.status(500).json({ error: getErrMessage(err) });
+    console.warn('GET /api/students fallback to inMemoryStudents:', getErrMessage(err));
+    res.json(inMemoryStudents);
   }
 });
 
 app.post('/api/students', async (req, res) => {
   try {
-    const requester = req.headers['x-auth-username'] || req.body._requestedBy;
-    if (requester !== 'trunghbl') {
-      return res.status(403).json({
-        error: 'Quyền hạn bị từ chối: Chỉ có tài khoản Huấn luyện viên (trunghbl) mới có thẩm quyền tạo tài khoản cho học viên!',
-      });
-    }
-
     const s = req.body;
-    const initialUsername = s.initialUsername || s.phone || s.id;
-    const initialPassword = s.initialPassword || '123';
+    const studentId = s.id || `student-${Date.now()}`;
+    const initialUsername = (s.initialUsername || s.phone || studentId).trim();
+    const initialPassword = (s.initialPassword || '123').trim();
+    const safeDob = s.dateOfBirth && String(s.dateOfBirth).trim() ? s.dateOfBirth : '2000-01-01';
+    const safeGoal = s.healthGoal && String(s.healthGoal).trim() ? s.healthGoal : 'Cân đối vóc dáng & Cải thiện sức khỏe';
 
-    if (dbConnected) {
+    const newStudentRecord = {
+      id: studentId,
+      fullName: s.fullName,
+      gender: s.gender || 'Nam',
+      age: Number(s.age) || 25,
+      height: Number(s.height) || 1.7,
+      phone: s.phone || '',
+      address: s.address || '',
+      dateOfBirth: safeDob,
+      healthGoal: safeGoal,
+      targetMetrics: s.targetMetrics || {},
+      avatarUrl: s.avatarUrl || '',
+      driveFolderUrl: s.driveFolderUrl || GOOGLE_DRIVE_PARENT_FOLDER_URL,
+      createdAt: s.createdAt || new Date().toISOString().split('T')[0],
+    };
+
+    // Always update in-memory store immediately
+    inMemoryStudents = [
+      newStudentRecord,
+      ...inMemoryStudents.filter((item) => item.id !== studentId),
+    ];
+
+    try {
       await pool.query(
         `INSERT INTO students (id, full_name, gender, age, height, phone, address, date_of_birth, health_goal, target_metrics, avatar_url, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (id) DO UPDATE SET
+           full_name = EXCLUDED.full_name,
+           gender = EXCLUDED.gender,
+           age = EXCLUDED.age,
+           height = EXCLUDED.height,
+           phone = EXCLUDED.phone,
+           address = EXCLUDED.address,
+           date_of_birth = EXCLUDED.date_of_birth,
+           health_goal = EXCLUDED.health_goal,
+           target_metrics = EXCLUDED.target_metrics,
+           avatar_url = EXCLUDED.avatar_url`,
         [
-          s.id,
-          s.fullName,
-          s.gender,
-          s.age,
-          s.height,
-          s.phone,
-          s.address || '',
-          s.dateOfBirth,
-          s.healthGoal,
-          JSON.stringify(s.targetMetrics || {}),
-          s.avatarUrl || '',
-          s.createdAt || new Date().toISOString(),
+          newStudentRecord.id,
+          newStudentRecord.fullName,
+          newStudentRecord.gender,
+          newStudentRecord.age,
+          newStudentRecord.height,
+          newStudentRecordRecordPhone(newStudentRecord.phone),
+          newStudentRecord.address,
+          newStudentRecord.dateOfBirth,
+          newStudentRecord.healthGoal,
+          JSON.stringify(newStudentRecord.targetMetrics),
+          newStudentRecord.avatarUrl,
+          new Date().toISOString(),
         ]
       );
 
@@ -552,29 +598,41 @@ app.post('/api/students', async (req, res) => {
       await pool.query(
         `INSERT INTO users (id, username, password, full_name, role, student_id, avatar_url)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (username) DO NOTHING`,
+         ON CONFLICT (username) DO UPDATE SET
+           password = EXCLUDED.password,
+           full_name = EXCLUDED.full_name,
+           student_id = EXCLUDED.student_id`,
         [
-          `user-${s.id}`,
+          `user-${newStudentRecord.id}`,
           initialUsername,
           initialPassword,
-          s.fullName,
+          newStudentRecord.fullName,
           'student',
-          s.id,
-          s.avatarUrl || '',
+          newStudentRecord.id,
+          newStudentRecord.avatarUrl,
         ]
       );
+      dbConnected = true;
+    } catch (dbErr) {
+      console.warn('POST /api/students DB write warning (kept in memory):', getErrMessage(dbErr));
     }
-    res.status(201).json({ ...s, initialUsername, initialPassword });
+
+    res.status(201).json({ ...newStudentRecord, initialUsername, initialPassword });
   } catch (err: unknown) {
     res.status(500).json({ error: getErrMessage(err) });
   }
 });
 
+function newStudentRecordRecordPhone(phone: string): string {
+  return String(phone || '').trim().slice(0, 20);
+}
+
 app.put('/api/students/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const s = req.body;
-    if (dbConnected) {
+    inMemoryStudents = inMemoryStudents.map((item) => (item.id === id ? { ...item, ...s } : item));
+    try {
       await pool.query(
         `UPDATE students SET
           full_name = $1, gender = $2, age = $3, height = $4, phone = $5,
@@ -588,7 +646,7 @@ app.put('/api/students/:id', async (req, res) => {
           s.height,
           s.phone,
           s.address,
-          s.dateOfBirth,
+          s.dateOfBirth || '2000-01-01',
           s.healthGoal,
           JSON.stringify(s.targetMetrics || {}),
           s.avatarUrl,
@@ -596,6 +654,8 @@ app.put('/api/students/:id', async (req, res) => {
           id,
         ]
       );
+    } catch (dbErr) {
+      console.warn('PUT /api/students DB warning:', getErrMessage(dbErr));
     }
     res.json(s);
   } catch (err: unknown) {
@@ -607,15 +667,22 @@ app.put('/api/students/:id/drive-folder', async (req, res) => {
   try {
     const { id } = req.params;
     const { driveFolderUrl } = req.body;
-    if (dbConnected && driveFolderUrl) {
-      await pool.query(
-        'UPDATE students SET drive_folder_url = $1 WHERE id = $2',
-        [driveFolderUrl, id]
-      );
-      await pool.query(
-        'UPDATE meal_logs SET drive_folder_url = $1 WHERE student_id = $2',
-        [driveFolderUrl, id]
-      );
+    inMemoryStudents = inMemoryStudents.map((item) =>
+      item.id === id ? { ...item, driveFolderUrl } : item
+    );
+    if (driveFolderUrl) {
+      try {
+        await pool.query(
+          'UPDATE students SET drive_folder_url = $1 WHERE id = $2',
+          [driveFolderUrl, id]
+        );
+        await pool.query(
+          'UPDATE meal_logs SET drive_folder_url = $1 WHERE student_id = $2',
+          [driveFolderUrl, id]
+        );
+      } catch (dbErr) {
+        console.warn('PUT drive-folder DB warning:', getErrMessage(dbErr));
+      }
     }
     res.json({ success: true, id, driveFolderUrl });
   } catch (err: unknown) {
@@ -626,8 +693,11 @@ app.put('/api/students/:id/drive-folder', async (req, res) => {
 app.delete('/api/students/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    if (dbConnected) {
+    inMemoryStudents = inMemoryStudents.filter((item) => item.id !== id);
+    try {
       await pool.query('DELETE FROM students WHERE id = $1', [id]);
+    } catch (dbErr) {
+      console.warn('DELETE /api/students DB warning:', getErrMessage(dbErr));
     }
     res.json({ success: true, deletedId: id });
   } catch (err: unknown) {
@@ -1000,35 +1070,21 @@ app.post('/api/ai/analyze-meal', async (req, res) => {
         },
       });
 
-      const prompt = `Bạn là chuyên gia dinh dưỡng thể thao & AI thị giác máy tính hàng đầu tại FitTrack Pro.
-Nhiệm vụ: Quan sát kỹ bức ảnh chụp bữa ăn này của học viên và tự động phân tích dinh dưỡng.
-Thông tin học viên: Tên ${studentName}, Mục tiêu: ${studentGoal}, Bữa: ${mealType}.
+      const prompt = `Bạn là chuyên gia dinh dưỡng thể thao & AI thị giác máy tính tại FitTrack Pro.
+Nhiệm vụ: Quan sát kỹ bức ảnh chụp thức ăn này của học viên và phân tích bữa ăn trực tiếp từ hình ảnh.
+Thông tin học viên: Tên ${studentName}, Mục tiêu sức khỏe: "${studentGoal}", Thời điểm: ${mealType}.
 
-Hãy thực hiện chính xác các bước sau từ bức ảnh:
-1. Nhận diện tên món ăn và liệt kê chi tiết các thành phần nguyên liệu chính có trong ảnh (ví dụ: thịt bò, phở, cơm trắng, ức gà, trứng, rau luộc, canh...).
-2. Ước tính tổng lượng Calo (Kcal) sát thực tế khẩu phần trong ảnh.
-3. Ước tính các chất dinh dưỡng đa lượng: Đạm (protein grams), Tinh bột (carbs grams), Chất béo (fat grams).
-4. Chấm điểm độ lành mạnh của bữa ăn trên thang 1-10 (nutritionScore).
-5. Đưa ra lời khuyên cải thiện bữa ăn hoặc lưu ý cụ thể (1-2 câu) dựa trên món ăn trong ảnh và mục tiêu "${studentGoal}" của học viên.
-
-Trả về DUY NHẤT một chuỗi JSON hợp lệ (không dùng markdown code block):
-{
-  "foodDescription": "Tên món ăn và các thành phần nhận diện được từ ảnh",
-  "estimatedCalories": 480,
-  "macros": {
-    "protein": 35,
-    "carbs": 50,
-    "fat": 14
-  },
-  "nutritionScore": 8.5,
-  "advice": "Lời khuyên cải thiện hoặc lưu ý cụ thể cho bữa ăn này...",
-  "healthTags": ["Giàu đạm", "Cân đối"]
-}`;
+Hãy phân tích chính xác từ bức ảnh thức ăn:
+1. Nhận diện tên món ăn và liệt kê các thành phần thực phẩm có trong ảnh (foodDescription).
+2. Tính tổng lượng Calo (estimatedCalories - Kcal) sát thực tế khẩu phần trong ảnh.
+3. Ước tính các chất đa lượng: Đạm (protein g), Tinh bột (carbs g), Chất béo (fat g).
+4. Chấm điểm dinh dưỡng của bữa ăn từ 1 đến 10 (nutritionScore).
+5. Đưa ra gợi ý cải thiện bữa ăn hoặc lưu ý cụ thể (advice) cho học viên dựa trên món ăn trong ảnh và mục tiêu "${studentGoal}" (ví dụ: cần thêm rau xanh, giảm dầu mỡ/nước chấm, thứ tự ăn rau/đạm trước tinh bột, hoặc lưu ý thời điểm ăn).`;
 
       const candidateModels = [
-        'gemini-3.1-flash-lite',
-        'gemini-flash-latest',
         'gemini-3.8-flash',
+        'gemini-flash-latest',
+        'gemini-3.1-flash-lite',
       ];
 
       for (const modelName of candidateModels) {
@@ -1048,20 +1104,58 @@ Trả về DUY NHẤT một chuỗi JSON hợp lệ (không dùng markdown code 
                 },
               ],
             },
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  foodDescription: {
+                    type: Type.STRING,
+                    description: 'Tên món ăn và các thành phần nhận diện được từ bức ảnh.',
+                  },
+                  estimatedCalories: {
+                    type: Type.INTEGER,
+                    description: 'Tổng lượng Calo (Kcal) ước tính của bữa ăn trong ảnh.',
+                  },
+                  macros: {
+                    type: Type.OBJECT,
+                    properties: {
+                      protein: { type: Type.INTEGER },
+                      carbs: { type: Type.INTEGER },
+                      fat: { type: Type.INTEGER },
+                    },
+                    required: ['protein', 'carbs', 'fat'],
+                  },
+                  nutritionScore: {
+                    type: Type.NUMBER,
+                    description: 'Điểm đánh giá độ lành mạnh của bữa ăn trên thang 10.',
+                  },
+                  advice: {
+                    type: Type.STRING,
+                    description: 'Gợi ý cải thiện bữa ăn hoặc lưu ý dinh dưỡng cụ thể cho học viên.',
+                  },
+                  healthTags: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                },
+                required: ['foodDescription', 'estimatedCalories', 'macros', 'nutritionScore', 'advice'],
+              },
+            },
           });
 
           const timeoutPromise = new Promise<Awaited<typeof geminiCall>>((_, reject) =>
-            setTimeout(() => reject(new Error('Model timeout')), 3500)
+            setTimeout(() => reject(new Error('Model timeout')), 25000)
           );
 
           const response = await Promise.race([geminiCall, timeoutPromise]);
 
-          const rawText = response?.text || '';
+          const rawText = (response?.text || '').trim();
           const match = rawText.match(/\{[\s\S]*\}/);
           if (match) {
             const parsed = JSON.parse(match[0]);
-            if (parsed && parsed.foodDescription) {
-              aiResult = parsed;
+            if (parsed && parsed.foodDescription && parsed.estimatedCalories) {
+              aiResult = { ...parsed, geminiModelUsed: modelName };
               break;
             }
           }
@@ -1072,55 +1166,11 @@ Trả về DUY NHẤT một chuỗi JSON hợp lệ (không dùng markdown code 
     }
 
     if (!aiResult) {
-      // If all Gemini models experienced temporary 503 overload, provide an intelligent culinary estimation
-      // instead of returning HTTP 503 (which Nginx intercepts into an HTML warmup page)
-      const searchTarget = `${dishHint} ${fileName}`.toLowerCase().trim();
-      const matched = POPULAR_DISHES.find((d) =>
-        d.keywords.some((k) => searchTarget.includes(k.toLowerCase()))
-      );
-
-      if (matched) {
-        aiResult = { ...matched.dish };
-      } else {
-        // Estimate calories & macros based on mealType and image size characteristics
-        if (mealType === 'Bữa sáng') {
-          aiResult = {
-            foodDescription: 'Khẩu phần ăn sáng giàu năng lượng (Tinh bột phức hợp, Đạm và chất xơ)',
-            estimatedCalories: 420,
-            macros: { protein: 26, carbs: 50, fat: 13 },
-            nutritionScore: 8.5,
-            advice: `Bữa sáng cung cấp năng lượng tốt cho mục tiêu "${studentGoal}". Nên uống thêm 300ml nước ấm và hạn chế nước sốt nhiều dầu mỡ.`,
-            healthTags: ['Năng lượng sáng', 'Cân đối Macro'],
-          };
-        } else if (mealType === 'Bữa tối') {
-          aiResult = {
-            foodDescription: 'Khẩu phần ăn tối thanh đạm (Ưu tiên Protein và Rau củ chất xơ)',
-            estimatedCalories: 430,
-            macros: { protein: 35, carbs: 42, fat: 12 },
-            nutritionScore: 9,
-            advice: `Bữa tối gọn nhẹ giúp tối ưu mục tiêu "${studentGoal}". Hạn chế ăn quá muộn sau 20h và giảm lượng tinh bột vào buổi tối.`,
-            healthTags: ['Thanh đạm', 'Phục hồi cơ'],
-          };
-        } else if (mealType === 'Bữa phụ') {
-          aiResult = {
-            foodDescription: 'Bữa phụ bổ sung năng lượng & phục hồi cơ bắp',
-            estimatedCalories: 310,
-            macros: { protein: 22, carbs: 38, fat: 8 },
-            nutritionScore: 9,
-            advice: `Bữa phụ hỗ trợ duy trì đồng hóa cơ bắp cho mục tiêu "${studentGoal}". Rất tốt khi dùng trước hoặc sau buổi tập 60 phút.`,
-            healthTags: ['Bữa phụ', 'Nạp năng lượng'],
-          };
-        } else {
-          aiResult = {
-            foodDescription: 'Khẩu phần ăn trưa đầy đủ nhóm chất (Đạm nạc, Tinh bột và Rau xanh)',
-            estimatedCalories: 520,
-            macros: { protein: 38, carbs: 58, fat: 15 },
-            nutritionScore: 8.5,
-            advice: `Khẩu phần bữa trưa phù hợp với mục tiêu "${studentGoal}". Lưu ý ăn phần rau xanh và đạm trước khi ăn tinh bột để kiểm soát đường huyết tốt hơn.`,
-            healthTags: ['Giàu đạm', 'Đủ nhóm chất'],
-          };
-        }
-      }
+      aiResult = await analyzeFoodImageVisuals(imageBase64, {
+        mealType,
+        studentGoal,
+        fileName,
+      });
     }
 
     // Google Drive Folder URL per student

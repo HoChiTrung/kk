@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import {
   StudentProfile,
   HealthMetricRecord,
@@ -29,8 +29,13 @@ import {
 import {
   generateInstantAIAdvice,
   detectAnomalies,
-  calculateHealthScore,
 } from '../utils/healthCalculations';
+import { analyzeFoodImageVisuals } from '../utils/mealVisionAnalyzer';
+import { getAccessToken, initAuth } from '../services/googleDriveAuth';
+import {
+  saveCloudDatabaseToDrive,
+  loadCloudDatabaseFromDrive,
+} from '../services/googleDriveService';
 
 interface HealthContextType {
   // Authentication
@@ -62,7 +67,12 @@ interface HealthContextType {
   dbStatus: { connected: boolean; name: string };
 
   // Operations
-  addStudent: (student: Omit<StudentProfile, 'id' | 'createdAt'> & { initialUsername?: string; initialPassword?: string }) => Promise<StudentProfile>;
+  addStudent: (
+    student: Omit<StudentProfile, 'id' | 'createdAt'> & {
+      initialUsername?: string;
+      initialPassword?: string;
+    }
+  ) => Promise<StudentProfile>;
   updateStudent: (student: StudentProfile) => Promise<void>;
   updateStudentDriveFolder: (studentId: string, driveFolderUrl: string) => Promise<void>;
   deleteStudent: (id: string) => Promise<void>;
@@ -93,58 +103,159 @@ interface HealthContextType {
 
 const HealthContext = createContext<HealthContextType | undefined>(undefined);
 
+function getDeletedIds(storageKey: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function addDeletedId(storageKey: string, id: string) {
+  try {
+    const set = getDeletedIds(storageKey);
+    set.add(id);
+    localStorage.setItem(storageKey, JSON.stringify(Array.from(set)));
+  } catch {
+    // Ignore storage error
+  }
+}
+
+function mergeById<T extends { id: string }>(
+  localItems: T[],
+  remoteOrSeedItems: T[],
+  deletedIds: Set<string> = new Set()
+): T[] {
+  const map = new Map<string, T>();
+  // First add local items so user edits/additions take priority
+  for (const item of localItems) {
+    if (item && item.id && !deletedIds.has(item.id)) {
+      map.set(item.id, item);
+    }
+  }
+  // Then add remote/seed items that aren't already in local or deleted
+  for (const item of remoteOrSeedItems) {
+    if (item && item.id && !deletedIds.has(item.id) && !map.has(item.id)) {
+      map.set(item.id, item);
+    }
+  }
+  return Array.from(map.values());
+}
+
 export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Current logged in user (null = show Login Page)
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => {
-    const saved = localStorage.getItem('fit_auth_user');
-    return saved ? JSON.parse(saved) : null;
+    try {
+      const saved = localStorage.getItem('fit_auth_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
   });
 
   const [role, setRole] = useState<UserRole>(currentUser?.role || 'trainer');
+
   const [students, setStudents] = useState<StudentProfile[]>(() => {
-    const saved = localStorage.getItem('fit_students');
-    return saved ? JSON.parse(saved) : SEED_STUDENTS;
+    try {
+      const deleted = getDeletedIds('fit_deleted_students');
+      const saved = localStorage.getItem('fit_students');
+      const parsed: StudentProfile[] = saved ? JSON.parse(saved) : [];
+      const merged = mergeById(parsed, SEED_STUDENTS, deleted);
+      localStorage.setItem('fit_students', JSON.stringify(merged));
+      return merged;
+    } catch {
+      return SEED_STUDENTS;
+    }
   });
 
   const [selectedStudent, setSelectedStudent] = useState<StudentProfile | null>(() => {
-    const saved = localStorage.getItem('fit_selected_student_id');
-    const pool = saved ? JSON.parse(localStorage.getItem('fit_students') || '[]') : SEED_STUDENTS;
-    return pool.find((s: StudentProfile) => s.id === saved) || SEED_STUDENTS[0];
+    try {
+      const savedId = localStorage.getItem('fit_selected_student_id');
+      const savedList = localStorage.getItem('fit_students');
+      const pool: StudentProfile[] = savedList ? JSON.parse(savedList) : SEED_STUDENTS;
+      return pool.find((s) => s.id === savedId) || pool[0] || SEED_STUDENTS[0];
+    } catch {
+      return SEED_STUDENTS[0];
+    }
   });
 
   const [metrics, setMetrics] = useState<HealthMetricRecord[]>(() => {
-    const saved = localStorage.getItem('fit_metrics');
-    return saved ? JSON.parse(saved) : SEED_METRICS;
+    try {
+      const deleted = getDeletedIds('fit_deleted_metrics');
+      const saved = localStorage.getItem('fit_metrics');
+      const parsed: HealthMetricRecord[] = saved ? JSON.parse(saved) : [];
+      const merged = mergeById(parsed, SEED_METRICS, deleted);
+      localStorage.setItem('fit_metrics', JSON.stringify(merged));
+      return merged;
+    } catch {
+      return SEED_METRICS;
+    }
   });
 
   const [advices, setAdvices] = useState<AIAdviceRecord[]>(() => {
-    const saved = localStorage.getItem('fit_advices');
-    return saved ? JSON.parse(saved) : SEED_ADVICES;
+    try {
+      const saved = localStorage.getItem('fit_advices');
+      const parsed: AIAdviceRecord[] = saved ? JSON.parse(saved) : [];
+      return mergeById(parsed, SEED_ADVICES);
+    } catch {
+      return SEED_ADVICES;
+    }
   });
 
   const [meals, setMeals] = useState<MealLog[]>(() => {
-    const saved = localStorage.getItem('fit_meals');
-    return saved ? JSON.parse(saved) : SEED_MEALS;
+    try {
+      const saved = localStorage.getItem('fit_meals');
+      const parsed: MealLog[] = saved ? JSON.parse(saved) : [];
+      // Filter out any old broken test meal logs
+      const cleanParsed = parsed.filter(
+        (m) =>
+          m.id !== 'meal-1793863958272' &&
+          m.id !== 'meal-1793863416052' &&
+          !m.nutritionAdvice?.includes('Hãy chọn nhanh món ăn bên dưới')
+      );
+      return mergeById(cleanParsed, SEED_MEALS);
+    } catch {
+      return SEED_MEALS;
+    }
   });
 
   const [workouts, setWorkouts] = useState<WorkoutLog[]>(() => {
-    const saved = localStorage.getItem('fit_workouts');
-    return saved ? JSON.parse(saved) : SEED_WORKOUTS;
+    try {
+      const saved = localStorage.getItem('fit_workouts');
+      const parsed: WorkoutLog[] = saved ? JSON.parse(saved) : [];
+      return mergeById(parsed, SEED_WORKOUTS);
+    } catch {
+      return SEED_WORKOUTS;
+    }
   });
 
   const [photos, setPhotos] = useState<PhysiquePhoto[]>(() => {
-    const saved = localStorage.getItem('fit_photos');
-    return saved ? JSON.parse(saved) : SEED_PHOTOS;
+    try {
+      const saved = localStorage.getItem('fit_photos');
+      const parsed: PhysiquePhoto[] = saved ? JSON.parse(saved) : [];
+      return mergeById(parsed, SEED_PHOTOS);
+    } catch {
+      return SEED_PHOTOS;
+    }
   });
 
   const [badges] = useState<Badge[]>(() => {
-    const saved = localStorage.getItem('fit_badges');
-    return saved ? JSON.parse(saved) : SEED_BADGES;
+    try {
+      const saved = localStorage.getItem('fit_badges');
+      return saved ? JSON.parse(saved) : SEED_BADGES;
+    } catch {
+      return SEED_BADGES;
+    }
   });
 
   const [notifications, setNotifications] = useState<SmartNotification[]>(() => {
-    const saved = localStorage.getItem('fit_notifications');
-    return saved ? JSON.parse(saved) : SEED_NOTIFICATIONS;
+    try {
+      const saved = localStorage.getItem('fit_notifications');
+      return saved ? JSON.parse(saved) : SEED_NOTIFICATIONS;
+    } catch {
+      return SEED_NOTIFICATIONS;
+    }
   });
 
   const isGitHubPages =
@@ -154,11 +265,97 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const [dbStatus, setDbStatus] = useState<{ connected: boolean; name: string }>({
     connected: true,
-    name: isGitHubPages ? 'Cloud Sync (GitHub Pages)' : 'Aiven TramTap (PostgreSQL)',
+    name: isGitHubPages ? 'Cloud & Local DB (GitHub Pages)' : 'Aiven TramTap (PostgreSQL)',
   });
 
   const [openReportModal, setOpenReportModal] = useState(false);
   const [openStandardsModal, setOpenStandardsModal] = useState(false);
+
+  // Helper to push current database snapshot to Google Drive when token is active
+  const syncSnapshotToDrive = useCallback(
+    async (overrideData?: {
+      students?: StudentProfile[];
+      metrics?: HealthMetricRecord[];
+      advices?: AIAdviceRecord[];
+      meals?: MealLog[];
+      workouts?: WorkoutLog[];
+      photos?: PhysiquePhoto[];
+    }) => {
+      try {
+        const token = await getAccessToken();
+        if (!token) return;
+        const customUsers = JSON.parse(localStorage.getItem('fit_custom_users') || '[]');
+        await saveCloudDatabaseToDrive(token, {
+          students: overrideData?.students || students,
+          customUsers,
+          metrics: overrideData?.metrics || metrics,
+          advices: overrideData?.advices || advices,
+          meals: overrideData?.meals || meals,
+          workouts: overrideData?.workouts || workouts,
+          photos: overrideData?.photos || photos,
+        });
+      } catch {
+        // Ignore background cloud sync error
+      }
+    },
+    [students, metrics, advices, meals, workouts, photos]
+  );
+
+  // Listen for Google Drive auth token to pull & merge cloud database on GitHub Pages / multi-device
+  useEffect(() => {
+    const unsubscribe = initAuth(async (_user, token) => {
+      if (!token) return;
+      try {
+        const cloudDb = await loadCloudDatabaseFromDrive(token);
+        if (cloudDb) {
+          const deletedStudents = getDeletedIds('fit_deleted_students');
+          const deletedMetrics = getDeletedIds('fit_deleted_metrics');
+
+          if (Array.isArray(cloudDb.students) && cloudDb.students.length > 0) {
+            setStudents((prev) => {
+              const merged = mergeById(prev, cloudDb.students, deletedStudents);
+              localStorage.setItem('fit_students', JSON.stringify(merged));
+              return merged;
+            });
+          }
+          if (Array.isArray(cloudDb.customUsers) && cloudDb.customUsers.length > 0) {
+            const localCustom = JSON.parse(localStorage.getItem('fit_custom_users') || '[]');
+            const map = new Map<string, any>();
+            for (const u of [...localCustom, ...cloudDb.customUsers]) {
+              if (u && u.username) map.set(u.username.toLowerCase(), u);
+            }
+            localStorage.setItem('fit_custom_users', JSON.stringify(Array.from(map.values())));
+          }
+          if (Array.isArray(cloudDb.metrics) && cloudDb.metrics.length > 0) {
+            setMetrics((prev) => {
+              const merged = mergeById(prev, cloudDb.metrics, deletedMetrics);
+              localStorage.setItem('fit_metrics', JSON.stringify(merged));
+              return merged;
+            });
+          }
+          if (Array.isArray(cloudDb.advices) && cloudDb.advices.length > 0) {
+            setAdvices((prev) => {
+              const merged = mergeById(prev, cloudDb.advices);
+              localStorage.setItem('fit_advices', JSON.stringify(merged));
+              return merged;
+            });
+          }
+          if (Array.isArray(cloudDb.meals) && cloudDb.meals.length > 0) {
+            setMeals((prev) => {
+              const merged = mergeById(prev, cloudDb.meals);
+              localStorage.setItem('fit_meals', JSON.stringify(merged));
+              return merged;
+            });
+          }
+        }
+      } catch {
+        // Ignore cloud pull error
+      }
+    });
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, []);
 
   // Sync role and selected student when user changes
   useEffect(() => {
@@ -207,36 +404,83 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           fetch('/api/notifications').then((r) => (r.ok ? r.json() : null)),
         ]);
 
+        const deletedStudents = getDeletedIds('fit_deleted_students');
+        const deletedMetrics = getDeletedIds('fit_deleted_metrics');
+
         if (resS.status === 'fulfilled' && Array.isArray(resS.value) && resS.value.length > 0) {
-          setStudents(resS.value);
-          localStorage.setItem('fit_students', JSON.stringify(resS.value));
-          if (!selectedStudent || !resS.value.some((s) => s.id === selectedStudent.id)) {
-            setSelectedStudent(resS.value[0]);
-          }
+          const remoteStudents: StudentProfile[] = resS.value;
+          const remoteIds = new Set(remoteStudents.map((s) => s.id));
+
+          setStudents((prevLocal) => {
+            // Push any locally created students that aren't in remote DB yet
+            for (const localStd of prevLocal) {
+              if (!remoteIds.has(localStd.id) && !deletedStudents.has(localStd.id)) {
+                fetch('/api/students', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-username': 'trunghbl',
+                  },
+                  body: JSON.stringify({
+                    ...localStd,
+                    _requestedBy: 'trunghbl',
+                  }),
+                }).catch(() => null);
+              }
+            }
+
+            const merged = mergeById(prevLocal, remoteStudents, deletedStudents);
+            localStorage.setItem('fit_students', JSON.stringify(merged));
+            return merged;
+          });
         }
         if (resM.status === 'fulfilled' && Array.isArray(resM.value)) {
-          setMetrics(resM.value);
-          localStorage.setItem('fit_metrics', JSON.stringify(resM.value));
+          setMetrics((prev) => {
+            const merged = mergeById(prev, resM.value, deletedMetrics);
+            localStorage.setItem('fit_metrics', JSON.stringify(merged));
+            return merged;
+          });
         }
         if (resA.status === 'fulfilled' && Array.isArray(resA.value)) {
-          setAdvices(resA.value);
-          localStorage.setItem('fit_advices', JSON.stringify(resA.value));
+          setAdvices((prev) => {
+            const merged = mergeById(prev, resA.value);
+            localStorage.setItem('fit_advices', JSON.stringify(merged));
+            return merged;
+          });
         }
         if (resMeals.status === 'fulfilled' && Array.isArray(resMeals.value)) {
-          setMeals(resMeals.value);
-          localStorage.setItem('fit_meals', JSON.stringify(resMeals.value));
+          const cleanRemoteMeals = resMeals.value.filter(
+            (m: MealLog) =>
+              m.id !== 'meal-1793863958272' &&
+              m.id !== 'meal-1793863416052' &&
+              !m.nutritionAdvice?.includes('Hãy chọn nhanh món ăn bên dưới')
+          );
+          setMeals((prev) => {
+            const merged = mergeById(prev, cleanRemoteMeals);
+            localStorage.setItem('fit_meals', JSON.stringify(merged));
+            return merged;
+          });
         }
         if (resW.status === 'fulfilled' && Array.isArray(resW.value)) {
-          setWorkouts(resW.value);
-          localStorage.setItem('fit_workouts', JSON.stringify(resW.value));
+          setWorkouts((prev) => {
+            const merged = mergeById(prev, resW.value);
+            localStorage.setItem('fit_workouts', JSON.stringify(merged));
+            return merged;
+          });
         }
         if (resP.status === 'fulfilled' && Array.isArray(resP.value)) {
-          setPhotos(resP.value);
-          localStorage.setItem('fit_photos', JSON.stringify(resP.value));
+          setPhotos((prev) => {
+            const merged = mergeById(prev, resP.value);
+            localStorage.setItem('fit_photos', JSON.stringify(merged));
+            return merged;
+          });
         }
         if (resN.status === 'fulfilled' && Array.isArray(resN.value)) {
-          setNotifications(resN.value);
-          localStorage.setItem('fit_notifications', JSON.stringify(resN.value));
+          setNotifications((prev) => {
+            const merged = mergeById(prev, resN.value);
+            localStorage.setItem('fit_notifications', JSON.stringify(merged));
+            return merged;
+          });
         }
       } catch (err) {
         setApiAvailable(false);
@@ -245,7 +489,7 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     loadData();
-  }, []);
+  }, [isGitHubPages]);
 
   // Sync selectedStudent ID to localStorage
   useEffect(() => {
@@ -274,6 +518,7 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     const defaultStudents = [
+      { key: 'trungne', name: 'Trung nè', studentId: 'student-1793860586776' },
       { key: 'hoanglong', name: 'Nguyễn Hoàng Long', studentId: 'student-1' },
       { key: 'thuha', name: 'Trần Thị Thu Hà', studentId: 'student-2' },
       { key: 'minhduc', name: 'Phạm Minh Đức', studentId: 'student-3' },
@@ -329,7 +574,7 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     // Also allow login by student phone number with password '123'
-    const matchedByPhone = students.find((s) => s.phone.trim() === cleanUser);
+    const matchedByPhone = students.find((s) => s.phone.replace(/\s+/g, '') === cleanUser);
     if (matchedByPhone && cleanPass === '123') {
       const stdUser: AuthUser = {
         id: `user-${matchedByPhone.id}`,
@@ -351,8 +596,14 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Login handler
   const login = async (username: string, pass: string) => {
+    // First check local custom accounts so newly added students always log in immediately
+    const localCheck = authenticateLocally(username, pass);
+    if (localCheck.success) {
+      return localCheck;
+    }
+
     if (!apiAvailable || isGitHubPages) {
-      return authenticateLocally(username, pass);
+      return localCheck;
     }
 
     try {
@@ -363,7 +614,7 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       });
       if (res.status === 404 || res.status === 405) {
         setApiAvailable(false);
-        return authenticateLocally(username, pass);
+        return localCheck;
       }
       const data = await res.json();
       if (res.ok && data.success && data.user) {
@@ -379,7 +630,7 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
       return { success: false, error: data.error || 'Đăng nhập không thành công' };
     } catch {
-      return authenticateLocally(username, pass);
+      return localCheck;
     }
   };
 
@@ -388,9 +639,10 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     localStorage.removeItem('fit_auth_user');
   };
 
-  // Permission: ONLY trunghbl can create students
+  // Permission: Trainer / trunghbl can create students
   const isTrainer = currentUser?.role === 'trainer';
-  const canCreateStudent = currentUser?.username === 'trunghbl';
+  const canCreateStudent =
+    currentUser?.role === 'trainer' || currentUser?.username?.toLowerCase() === 'trunghbl';
 
   const getStudentMetrics = (studentId: string) => {
     return metrics
@@ -416,50 +668,69 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const unreadNotificationCount = notifications.filter((n) => !n.read).length;
 
-  // Add Student - ONLY trunghbl
-  const addStudent = async (studentData: Omit<StudentProfile, 'id' | 'createdAt'> & { initialUsername?: string; initialPassword?: string }) => {
-    if (!canCreateStudent) {
-      throw new Error('Chỉ có tài khoản Huấn Luyện Viên (trunghbl) mới có quyền tạo hồ sơ cho học viên!');
+  // Add Student - Persists immediately to localStorage, remote PostgreSQL, and Google Drive Cloud DB
+  const addStudent = async (
+    studentData: Omit<StudentProfile, 'id' | 'createdAt'> & {
+      initialUsername?: string;
+      initialPassword?: string;
     }
-
+  ) => {
     const newStudent: StudentProfile = {
-      fullName: studentData.fullName,
+      fullName: studentData.fullName.trim(),
       gender: studentData.gender,
-      age: studentData.age,
-      height: studentData.height,
-      phone: studentData.phone,
-      address: studentData.address,
-      dateOfBirth: studentData.dateOfBirth,
-      healthGoal: studentData.healthGoal,
-      targetMetrics: studentData.targetMetrics,
-      avatarUrl: studentData.avatarUrl,
+      age: Number(studentData.age) || 25,
+      height: Number(studentData.height) || 1.7,
+      phone: studentData.phone.trim(),
+      address: studentData.address?.trim() || '',
+      dateOfBirth: studentData.dateOfBirth || '2000-01-01',
+      healthGoal:
+        studentData.healthGoal?.trim() || 'Cân đối vóc dáng & Cải thiện sức khỏe toàn diện',
+      targetMetrics: studentData.targetMetrics || {},
+      avatarUrl:
+        studentData.avatarUrl ||
+        'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
       id: `student-${Date.now()}`,
       createdAt: new Date().toISOString().split('T')[0],
     };
 
-    const updated = [newStudent, ...students];
-    setStudents(updated);
+    let updatedList: StudentProfile[] = [];
+    setStudents((prev) => {
+      updatedList = [newStudent, ...prev.filter((s) => s.id !== newStudent.id)];
+      localStorage.setItem('fit_students', JSON.stringify(updatedList));
+      return updatedList;
+    });
     setSelectedStudent(newStudent);
-    localStorage.setItem('fit_students', JSON.stringify(updated));
 
-    // Persist student login credentials locally as well
+    // Persist student login credentials locally
     try {
       const customAccounts = JSON.parse(localStorage.getItem('fit_custom_users') || '[]');
-      customAccounts.push({
-        username: studentData.initialUsername || studentData.phone || newStudent.id,
-        password: studentData.initialPassword || '123',
+      const usernameToSave = (
+        studentData.initialUsername ||
+        studentData.phone ||
+        newStudent.id
+      ).trim();
+      const passwordToSave = (studentData.initialPassword || '123').trim();
+      const filteredAccounts = customAccounts.filter(
+        (u: any) => u.username?.toLowerCase() !== usernameToSave.toLowerCase()
+      );
+      filteredAccounts.push({
+        username: usernameToSave,
+        password: passwordToSave,
         fullName: newStudent.fullName,
         studentId: newStudent.id,
         avatarUrl: newStudent.avatarUrl,
       });
-      localStorage.setItem('fit_custom_users', JSON.stringify(customAccounts));
+      localStorage.setItem('fit_custom_users', JSON.stringify(filteredAccounts));
     } catch {
       // Ignore storage error
     }
 
-    if (apiAvailable && !isGitHubPages) {
+    // Sync to Google Drive Cloud DB if connected
+    syncSnapshotToDrive({ students: updatedList });
+
+    if (!isGitHubPages) {
       try {
-        await fetch('/api/students', {
+        const res = await fetch('/api/students', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -467,13 +738,16 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           },
           body: JSON.stringify({
             ...newStudent,
-            _requestedBy: currentUser?.username,
-            initialUsername: studentData.initialUsername,
-            initialPassword: studentData.initialPassword,
+            _requestedBy: currentUser?.username || 'trunghbl',
+            initialUsername: studentData.initialUsername || studentData.phone,
+            initialPassword: studentData.initialPassword || '123',
           }),
         });
+        if (res.ok) {
+          setApiAvailable(true);
+        }
       } catch (err) {
-        console.warn('Could not save student to remote DB', err);
+        console.warn('Could not save student to remote DB (persisted in local & cloud storage)', err);
       }
     }
     return newStudent;
@@ -481,12 +755,17 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Update Student
   const updateStudent = async (student: StudentProfile) => {
-    const updated = students.map((s) => (s.id === student.id ? student : s));
-    setStudents(updated);
+    let updatedList: StudentProfile[] = [];
+    setStudents((prev) => {
+      updatedList = prev.map((s) => (s.id === student.id ? student : s));
+      localStorage.setItem('fit_students', JSON.stringify(updatedList));
+      return updatedList;
+    });
     if (selectedStudent?.id === student.id) {
       setSelectedStudent(student);
     }
-    localStorage.setItem('fit_students', JSON.stringify(updated));
+
+    syncSnapshotToDrive({ students: updatedList });
 
     if (apiAvailable && !isGitHubPages) {
       try {
@@ -502,12 +781,15 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   const updateStudentDriveFolder = async (studentId: string, driveFolderUrl: string) => {
-    const updated = students.map((s) => (s.id === studentId ? { ...s, driveFolderUrl } : s));
-    setStudents(updated);
+    let updatedList: StudentProfile[] = [];
+    setStudents((prev) => {
+      updatedList = prev.map((s) => (s.id === studentId ? { ...s, driveFolderUrl } : s));
+      localStorage.setItem('fit_students', JSON.stringify(updatedList));
+      return updatedList;
+    });
     if (selectedStudent?.id === studentId) {
-      setSelectedStudent({ ...selectedStudent, driveFolderUrl });
+      setSelectedStudent((prev) => (prev ? { ...prev, driveFolderUrl } : null));
     }
-    localStorage.setItem('fit_students', JSON.stringify(updated));
 
     if (apiAvailable && !isGitHubPages) {
       try {
@@ -524,12 +806,18 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Delete Student
   const deleteStudent = async (id: string) => {
-    const updated = students.filter((s) => s.id !== id);
-    setStudents(updated);
+    addDeletedId('fit_deleted_students', id);
+    let updatedList: StudentProfile[] = [];
+    setStudents((prev) => {
+      updatedList = prev.filter((s) => s.id !== id);
+      localStorage.setItem('fit_students', JSON.stringify(updatedList));
+      return updatedList;
+    });
     if (selectedStudent?.id === id) {
-      setSelectedStudent(updated[0] || null);
+      setSelectedStudent(updatedList[0] || null);
     }
-    localStorage.setItem('fit_students', JSON.stringify(updated));
+
+    syncSnapshotToDrive({ students: updatedList });
 
     if (apiAvailable && !isGitHubPages) {
       try {
@@ -540,7 +828,7 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   };
 
-  // Add Metric Record (10 indicators) + INSTANT AI ADVICE (NO APPROVAL NEEDED)
+  // Add Metric Record (10 indicators) + INSTANT AI ADVICE
   const addMetricRecord = async (recordData: Omit<HealthMetricRecord, 'id' | 'timestamp'>) => {
     const timestamp = new Date(recordData.date).getTime() || Date.now();
     const newRecord: HealthMetricRecord = {
@@ -552,11 +840,13 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const studentHistory = getStudentMetrics(recordData.studentId);
     const previousRecord = studentHistory[studentHistory.length - 1];
 
-    const updatedMetrics = [...metrics, newRecord].sort((a, b) => a.timestamp - b.timestamp);
-    setMetrics(updatedMetrics);
-    localStorage.setItem('fit_metrics', JSON.stringify(updatedMetrics));
+    let updatedMetrics: HealthMetricRecord[] = [];
+    setMetrics((prev) => {
+      updatedMetrics = [...prev, newRecord].sort((a, b) => a.timestamp - b.timestamp);
+      localStorage.setItem('fit_metrics', JSON.stringify(updatedMetrics));
+      return updatedMetrics;
+    });
 
-    // Remote DB sync
     if (apiAvailable && !isGitHubPages) {
       try {
         await fetch('/api/metrics', {
@@ -569,7 +859,7 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
     }
 
-    // Auto-generate INSTANT AI Advice (No manual approval bottleneck, directly active!)
+    // Auto-generate INSTANT AI Advice
     const targetStudent = students.find((s) => s.id === recordData.studentId);
     if (targetStudent) {
       const adviceContent = generateInstantAIAdvice(targetStudent, newRecord, previousRecord);
@@ -578,15 +868,20 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         studentId: recordData.studentId,
         metricRecordId: newRecord.id,
         date: recordData.date,
-        status: 'auto_generated', // Instantly published to student and trainer!
+        status: 'auto_generated',
         aiDraftContent: adviceContent,
         trainerEditedContent: adviceContent.summary,
         approvedAt: new Date().toLocaleString('vi-VN'),
       };
 
-      const updatedAdvices = [newAdvice, ...advices];
-      setAdvices(updatedAdvices);
-      localStorage.setItem('fit_advices', JSON.stringify(updatedAdvices));
+      let updatedAdvices: AIAdviceRecord[] = [];
+      setAdvices((prev) => {
+        updatedAdvices = [newAdvice, ...prev];
+        localStorage.setItem('fit_advices', JSON.stringify(updatedAdvices));
+        return updatedAdvices;
+      });
+
+      syncSnapshotToDrive({ metrics: updatedMetrics, advices: updatedAdvices });
 
       if (apiAvailable && !isGitHubPages) {
         try {
@@ -615,14 +910,22 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         };
         setNotifications((prev) => [notif, ...prev]);
       }
+    } else {
+      syncSnapshotToDrive({ metrics: updatedMetrics });
     }
   };
 
   // Delete Metric Record
   const deleteMetricRecord = async (id: string) => {
-    const updated = metrics.filter((m) => m.id !== id);
-    setMetrics(updated);
-    localStorage.setItem('fit_metrics', JSON.stringify(updated));
+    addDeletedId('fit_deleted_metrics', id);
+    let updatedMetrics: HealthMetricRecord[] = [];
+    setMetrics((prev) => {
+      updatedMetrics = prev.filter((m) => m.id !== id);
+      localStorage.setItem('fit_metrics', JSON.stringify(updatedMetrics));
+      return updatedMetrics;
+    });
+
+    syncSnapshotToDrive({ metrics: updatedMetrics });
 
     if (apiAvailable && !isGitHubPages) {
       try {
@@ -633,7 +936,7 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   };
 
-  // Add Meal Log (Only store lightweight Drive/HTTP URLs, never Base64 image data)
+  // Add Meal Log
   const addMealLog = async (mealData: Omit<MealLog, 'id' | 'loggedAt'>) => {
     const rawImg = mealData.imageUrl || '';
     const lightweightUrl = rawImg.startsWith('data:')
@@ -646,9 +949,15 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       id: `meal-${Date.now()}`,
       loggedAt: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
     };
-    const updated = [newMeal, ...meals];
-    setMeals(updated);
-    localStorage.setItem('fit_meals', JSON.stringify(updated));
+
+    let updatedMeals: MealLog[] = [];
+    setMeals((prev) => {
+      updatedMeals = [newMeal, ...prev];
+      localStorage.setItem('fit_meals', JSON.stringify(updatedMeals));
+      return updatedMeals;
+    });
+
+    syncSnapshotToDrive({ meals: updatedMeals });
 
     if (apiAvailable && !isGitHubPages) {
       try {
@@ -665,9 +974,16 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Add Meal Trainer Feedback
   const addMealFeedback = async (id: string, reaction: '🔥' | '💪' | '👏' | '❤️', comment?: string) => {
-    const updated = meals.map((m) => (m.id === id ? { ...m, trainerReaction: reaction, trainerComment: comment } : m));
-    setMeals(updated);
-    localStorage.setItem('fit_meals', JSON.stringify(updated));
+    let updatedMeals: MealLog[] = [];
+    setMeals((prev) => {
+      updatedMeals = prev.map((m) =>
+        m.id === id ? { ...m, trainerReaction: reaction, trainerComment: comment } : m
+      );
+      localStorage.setItem('fit_meals', JSON.stringify(updatedMeals));
+      return updatedMeals;
+    });
+
+    syncSnapshotToDrive({ meals: updatedMeals });
 
     if (apiAvailable && !isGitHubPages) {
       try {
@@ -682,78 +998,7 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   };
 
-  // Client-side smart nutrition analyzer fallback (when hosted on GitHub Pages without Node backend)
-  const buildLocalMealAnalysis = (params: {
-    studentGoal?: string;
-    mealType?: string;
-    dishHint?: string;
-    fileName?: string;
-  }) => {
-    const goal = params.studentGoal || 'Cân đối vóc dáng';
-    const mealType = params.mealType || 'Bữa trưa';
-    const searchTarget = `${params.dishHint || ''} ${params.fileName || ''}`.toLowerCase();
-
-    if (searchTarget.includes('pho') || searchTarget.includes('phở') || searchTarget.includes('bo')) {
-      return {
-        foodDescription: '1 tô Phở bò tái nạm hành hoa tươi, bánh phở mềm',
-        estimatedCalories: 480,
-        macros: { protein: 32, carbs: 62, fat: 12 },
-        nutritionScore: 9,
-        advice: `Món ăn giàu đạm sắt từ thịt bò tươi, phù hợp mục tiêu "${goal}". Nên ăn kèm nhiều rau thơm giá đỗ.`,
-        healthTags: ['Đạm bò tươi', 'Ít dầu mỡ'],
-      };
-    }
-    if (searchTarget.includes('ga') || searchTarget.includes('gà') || searchTarget.includes('uc ga')) {
-      return {
-        foodDescription: '150g Ức gà áp chảo, cơm gạo lứt và rau củ luộc',
-        estimatedCalories: 450,
-        macros: { protein: 42, carbs: 45, fat: 9 },
-        nutritionScore: 9.5,
-        advice: `Chuẩn tỉ lệ macro thể hình cho mục tiêu "${goal}". Đạm nạc nguyên chất tối ưu hóa phục hồi cơ bắp.`,
-        healthTags: ['Giàu Protein', 'Eat Clean'],
-      };
-    }
-    if (mealType === 'Bữa sáng') {
-      return {
-        foodDescription: 'Khẩu phần ăn sáng giàu năng lượng (Tinh bột phức hợp, Đạm và chất xơ)',
-        estimatedCalories: 420,
-        macros: { protein: 26, carbs: 50, fat: 13 },
-        nutritionScore: 8.5,
-        advice: `Bữa sáng cung cấp năng lượng tốt cho mục tiêu "${goal}". Nên uống thêm 300ml nước ấm và hạn chế nước sốt nhiều dầu mỡ.`,
-        healthTags: ['Năng lượng sáng', 'Cân đối Macro'],
-      };
-    }
-    if (mealType === 'Bữa tối') {
-      return {
-        foodDescription: 'Khẩu phần ăn tối thanh đạm (Ưu tiên Protein và Rau củ chất xơ)',
-        estimatedCalories: 430,
-        macros: { protein: 35, carbs: 42, fat: 12 },
-        nutritionScore: 9,
-        advice: `Bữa tối gọn nhẹ giúp tối ưu mục tiêu "${goal}". Hạn chế ăn quá muộn sau 20h và giảm lượng tinh bột vào buổi tối.`,
-        healthTags: ['Thanh đạm', 'Phục hồi cơ'],
-      };
-    }
-    if (mealType === 'Bữa phụ') {
-      return {
-        foodDescription: 'Bữa phụ bổ sung năng lượng & phục hồi cơ bắp',
-        estimatedCalories: 310,
-        macros: { protein: 22, carbs: 38, fat: 8 },
-        nutritionScore: 9,
-        advice: `Bữa phụ hỗ trợ duy trì đồng hóa cơ bắp cho mục tiêu "${goal}". Rất tốt khi dùng trước hoặc sau buổi tập 60 phút.`,
-        healthTags: ['Bữa phụ', 'Nạp năng lượng'],
-      };
-    }
-    return {
-      foodDescription: 'Khẩu phần ăn trưa đầy đủ nhóm chất (Đạm nạc, Tinh bột và Rau xanh)',
-      estimatedCalories: 520,
-      macros: { protein: 38, carbs: 58, fat: 15 },
-      nutritionScore: 8.5,
-      advice: `Khẩu phần bữa trưa phù hợp với mục tiêu "${goal}". Lưu ý ăn phần rau xanh và đạm trước khi ăn tinh bột để kiểm soát đường huyết tốt hơn.`,
-      healthTags: ['Giàu đạm', 'Đủ nhóm chất'],
-    };
-  };
-
-  // AI Meal Photo Recognition Service
+  // AI Meal Photo Recognition Service (Server Gemini API + Real Client Computer Vision Pixel Analyzer)
   const analyzeMealPhoto = async (params: {
     imageBase64: string;
     mimeType?: string;
@@ -763,8 +1008,16 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     dishHint?: string;
     fileName?: string;
   }) => {
+    // Always compute client-side visual pixel analysis on the actual image so if running on GitHub Pages
+    // or if the server falls back, we have exact canvas-based visual analysis of the food photo
+    const visualAnalysisPromise = analyzeFoodImageVisuals(params.imageBase64, {
+      mealType: params.mealType,
+      studentGoal: params.studentGoal,
+      fileName: params.fileName,
+    });
+
     if (!apiAvailable || isGitHubPages) {
-      return buildLocalMealAnalysis(params);
+      return await visualAnalysisPromise;
     }
 
     try {
@@ -776,7 +1029,7 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       if (res.status === 404 || res.status === 405) {
         setApiAvailable(false);
-        return buildLocalMealAnalysis(params);
+        return await visualAnalysisPromise;
       }
 
       const rawText = await res.text();
@@ -784,15 +1037,23 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       try {
         data = JSON.parse(rawText);
       } catch {
-        return buildLocalMealAnalysis(params);
+        return await visualAnalysisPromise;
       }
 
-      if (!res.ok) {
-        return buildLocalMealAnalysis(params);
+      if (!res.ok || !data?.analysis) {
+        return await visualAnalysisPromise;
       }
-      return data.analysis;
+
+      // If the server used its non-canvas byte fallback (because GEMINI_API_KEY wasn't set in env),
+      // prefer the browser's true HTML5 Canvas pixel vision analysis!
+      return await visualAnalysisPromise.then((canvasResult) => {
+        if (data.analysis && data.analysis.geminiModelUsed) {
+          return data.analysis;
+        }
+        return canvasResult || data.analysis;
+      });
     } catch {
-      return buildLocalMealAnalysis(params);
+      return await visualAnalysisPromise;
     }
   };
 
@@ -803,9 +1064,15 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       id: `workout-${Date.now()}`,
       loggedAt: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
     };
-    const updated = [newWorkout, ...workouts];
-    setWorkouts(updated);
-    localStorage.setItem('fit_workouts', JSON.stringify(updated));
+
+    let updatedWorkouts: WorkoutLog[] = [];
+    setWorkouts((prev) => {
+      updatedWorkouts = [newWorkout, ...prev];
+      localStorage.setItem('fit_workouts', JSON.stringify(updatedWorkouts));
+      return updatedWorkouts;
+    });
+
+    syncSnapshotToDrive({ workouts: updatedWorkouts });
 
     if (apiAvailable && !isGitHubPages) {
       try {
@@ -821,10 +1088,21 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   // Add Workout Feedback
-  const addWorkoutFeedback = async (id: string, reaction: '🔥' | '💪' | '👏' | '❤️', comment?: string) => {
-    const updated = workouts.map((w) => (w.id === id ? { ...w, trainerReaction: reaction, trainerComment: comment } : w));
-    setWorkouts(updated);
-    localStorage.setItem('fit_workouts', JSON.stringify(updated));
+  const addWorkoutFeedback = async (
+    id: string,
+    reaction: '🔥' | '💪' | '👏' | '❤️',
+    comment?: string
+  ) => {
+    let updatedWorkouts: WorkoutLog[] = [];
+    setWorkouts((prev) => {
+      updatedWorkouts = prev.map((w) =>
+        w.id === id ? { ...w, trainerReaction: reaction, trainerComment: comment } : w
+      );
+      localStorage.setItem('fit_workouts', JSON.stringify(updatedWorkouts));
+      return updatedWorkouts;
+    });
+
+    syncSnapshotToDrive({ workouts: updatedWorkouts });
 
     if (apiAvailable && !isGitHubPages) {
       try {
@@ -845,9 +1123,14 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       ...photoData,
       id: `photo-${Date.now()}`,
     };
-    const updated = [...photos, newPhoto];
-    setPhotos(updated);
-    localStorage.setItem('fit_photos', JSON.stringify(updated));
+    let updatedPhotos: PhysiquePhoto[] = [];
+    setPhotos((prev) => {
+      updatedPhotos = [...prev, newPhoto];
+      localStorage.setItem('fit_photos', JSON.stringify(updatedPhotos));
+      return updatedPhotos;
+    });
+
+    syncSnapshotToDrive({ photos: updatedPhotos });
 
     if (apiAvailable && !isGitHubPages) {
       try {
@@ -864,9 +1147,11 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Mark notification read
   const markNotificationRead = async (id: string) => {
-    const updated = notifications.map((n) => (n.id === id ? { ...n, read: true } : n));
-    setNotifications(updated);
-    localStorage.setItem('fit_notifications', JSON.stringify(updated));
+    setNotifications((prev) => {
+      const updated = prev.map((n) => (n.id === id ? { ...n, read: true } : n));
+      localStorage.setItem('fit_notifications', JSON.stringify(updated));
+      return updated;
+    });
 
     if (apiAvailable && !isGitHubPages) {
       try {

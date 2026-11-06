@@ -16,6 +16,25 @@ import type {
 
 export const SEED_STUDENTS: StudentProfile[] = [
   {
+    id: 'student-1793860586776',
+    fullName: 'Trung nè',
+    gender: 'Nam',
+    age: 25,
+    height: 1.70,
+    phone: '0327891577',
+    address: '12 Ngọ To',
+    dateOfBirth: '2000-01-01',
+    healthGoal: 'Giảm mỡ bụng',
+    targetMetrics: {
+      targetWeight: 61.0,
+      targetVisceralFat: 4,
+      targetMuscleMass: 50.0,
+      targetWaist: 77.0,
+    },
+    avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
+    createdAt: '2026-11-05',
+  },
+  {
     id: 'student-1',
     fullName: 'Nguyễn Hoàng Long',
     gender: 'Nam',
@@ -98,6 +117,23 @@ export const SEED_STUDENTS: StudentProfile[] = [
 ];
 
 export const SEED_METRICS: HealthMetricRecord[] = [
+  {
+    id: 'metric-1793860659222',
+    studentId: 'student-1793860586776',
+    date: '2026-11-05',
+    timestamp: 1793836800000,
+    weight: 62.0,
+    subcutaneousFat: 9.0,
+    boneCalcium: 3.0,
+    bodyWater: 55.0,
+    muscleMass: 32.0,
+    bodyType: 'Tiêu chuẩn',
+    bmr: 1500,
+    biologicalAge: 19,
+    visceralFat: 1,
+    waist: 80.0,
+    notes: 'Số đo khởi điểm của học viên Trung nè.',
+  },
   // Student 1 (Nguyễn Hoàng Long): 4 measurements showing substantial fat loss
   {
     id: 'metric-1-1',

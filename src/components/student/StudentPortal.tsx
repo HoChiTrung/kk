@@ -293,67 +293,57 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
   const handleMealSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!foodDesc.trim() || !calories) {
+    if (!mealImage && !foodDesc.trim()) {
+      setAnalyzeError('Vui lòng chụp ảnh thức ăn hoặc tải ảnh bữa ăn lên để AI phân tích.');
       return;
     }
 
     let finalDriveFolderUrl = studentDriveFolderUrl || student.driveFolderUrl || GOOGLE_DRIVE_PARENT_URL;
     let finalDriveFileUrl = finalDriveFolderUrl;
     let lightweightImageLink =
-      'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=600&q=80';
+      mealImage && !mealImage.startsWith('data:')
+        ? mealImage
+        : 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=600&q=80';
 
-    // Upload photo directly to the trainer's Google Drive folder (1DJCFlItKnPr4-YGShTwmJEgiFQ8Yayqc -> student subfolder)
-    // and only save the lightweight Drive URL link to the database (never save Base64 to DB)
-    if (mealImage) {
+    // If Google Drive token is active, upload photo to the student's Drive folder
+    const activeToken = googleToken || (await getAccessToken());
+    if (mealImage && activeToken) {
       try {
         setIsUploadingToDrive(true);
-        let activeToken = googleToken || (await getAccessToken());
-        if (!activeToken) {
-          const signInRes = await googleSignIn();
-          if (signInRes?.accessToken) {
-            activeToken = signInRes.accessToken;
-            setGoogleUser(signInRes.user);
-            setGoogleToken(signInRes.accessToken);
-          }
+        let targetFolderId = studentDriveFolderId;
+        if (!targetFolderId) {
+          const folder = await findOrCreateStudentFolder(activeToken, student.fullName, student.id);
+          targetFolderId = folder.folderId;
+          finalDriveFolderUrl = folder.folderUrl;
+          setStudentDriveFolderId(folder.folderId);
+          setStudentDriveFolderUrl(folder.folderUrl);
+          updateStudentDriveFolder(student.id, folder.folderUrl);
         }
 
-        if (activeToken) {
-          let targetFolderId = studentDriveFolderId;
-          if (!targetFolderId) {
-            const folder = await findOrCreateStudentFolder(activeToken, student.fullName, student.id);
-            targetFolderId = folder.folderId;
-            finalDriveFolderUrl = folder.folderUrl;
-            setStudentDriveFolderId(folder.folderId);
-            setStudentDriveFolderUrl(folder.folderUrl);
-            updateStudentDriveFolder(student.id, folder.folderUrl);
-          }
-
-          const safeStudentName = student.fullName.replace(/\s+/g, '_');
-          const fileName = `bua_an_${safeStudentName}_${mealType}_${Date.now()}.jpg`;
-          const driveResult = await uploadMealPhotoToDrive(
-            activeToken,
-            targetFolderId,
-            mealImage,
-            'image/jpeg',
-            fileName
-          );
-          // Use the lightweight Google Drive direct image URL (~65 chars) instead of Base64
-          lightweightImageLink = driveResult.directImageUrl;
-          finalDriveFileUrl = driveResult.webViewLink;
-          setDrivePhotos((prev) => [
-            {
-              id: driveResult.fileId,
-              name: driveResult.fileName,
-              directImageUrl: driveResult.directImageUrl,
-              webViewLink: driveResult.webViewLink,
-              createdTime: new Date().toISOString(),
-            },
-            ...prev,
-          ]);
-          setDriveNotification(
-            `Đã lưu ảnh vào thư mục Google Drive của ${student.fullName} (chỉ lưu link nhẹ vào hệ thống)!`
-          );
-        }
+        const safeStudentName = student.fullName.replace(/\s+/g, '_');
+        const fileName = `bua_an_${safeStudentName}_${mealType}_${Date.now()}.jpg`;
+        const driveResult = await uploadMealPhotoToDrive(
+          activeToken,
+          targetFolderId,
+          mealImage,
+          'image/jpeg',
+          fileName
+        );
+        lightweightImageLink = driveResult.directImageUrl;
+        finalDriveFileUrl = driveResult.webViewLink;
+        setDrivePhotos((prev) => [
+          {
+            id: driveResult.fileId,
+            name: driveResult.fileName,
+            directImageUrl: driveResult.directImageUrl,
+            webViewLink: driveResult.webViewLink,
+            createdTime: new Date().toISOString(),
+          },
+          ...prev,
+        ]);
+        setDriveNotification(
+          `Đã lưu bữa ăn và tải ảnh lên thư mục Google Drive của ${student.fullName}!`
+        );
       } catch (uploadErr: any) {
         console.warn('Không thể tải ảnh lên Google Drive:', uploadErr);
       } finally {
@@ -366,17 +356,19 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
       date: new Date().toISOString().split('T')[0],
       mealType,
       imageUrl: lightweightImageLink,
-      foodDescription: foodDesc || 'Bữa ăn dinh dưỡng chuẩn macro (AI nhận diện)',
+      foodDescription: foodDesc || 'Bữa ăn được AI phân tích từ ảnh chụp',
       estimatedCalories: parseInt(calories, 10) || 450,
       macros: {
-        protein: parseInt(protein, 10) || 35,
-        carbs: parseInt(carbs, 10) || 40,
-        fat: parseInt(fat, 10) || 12,
+        protein: parseInt(protein, 10) || 32,
+        carbs: parseInt(carbs, 10) || 48,
+        fat: parseInt(fat, 10) || 13,
       },
       driveFolderUrl: finalDriveFolderUrl,
       driveFileUrl: finalDriveFileUrl,
       aiAnalyzed: true,
-      nutritionAdvice: nutritionAdvice || undefined,
+      nutritionAdvice:
+        nutritionAdvice ||
+        'Ăn chậm nhai kỹ, ưu tiên ăn rau xanh và đạm trước tinh bột để tối ưu chuyển hóa.',
     });
     setShowMealModal(false);
     setMealImage('');
@@ -385,6 +377,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
     setProtein('');
     setCarbs('');
     setFat('');
+    setNutritionAdvice('');
     setAnalyzeSuccess(false);
 
     confetti({
@@ -751,16 +744,15 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
               <div className="flex items-center space-x-2">
                 <Utensils className="w-5 h-5 text-emerald-600" />
                 <h3 className="font-bold text-slate-900 text-base">
-                  Nhật Ký Dinh Dưỡng Hàng Ngày (SRS 3.1 & AI Vision)
+                  Nhật Ký Dinh Dưỡng Hàng Ngày (AI Phân Tích Bữa Ăn)
                 </h3>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                Chỉ cần chụp ảnh bữa ăn, Gemini AI tự động bóc tách thành phần, ước tính Calo & Macro tức thì.
+                Chụp ảnh thức ăn hoặc đẩy ảnh lên — AI sẽ phân tích món ăn, tính tổng Calo và đưa ra gợi ý cải thiện bữa ăn.
               </p>
             </div>
             <button
               onClick={() => {
-                // ALWAYS clear old photo and old numbers when opening the new meal modal
                 setMealImage('');
                 setFoodDesc('');
                 setCalories('');
@@ -779,11 +771,11 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
               className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center space-x-1.5 self-start sm:self-auto cursor-pointer"
             >
               <Camera className="w-4 h-4" />
-              <span>Chụp / Tải Bữa Ăn Mới</span>
+              <span>Chụp / Đẩy Ảnh Bữa Ăn Lên</span>
             </button>
           </div>
 
-          {/* Google Drive Folder Direct Link & Photos Section (Zero DB Bloat) */}
+          {/* Google Drive Folder Direct Link & Photos Section */}
           <div className="space-y-3">
             <div className="p-4 bg-gradient-to-r from-emerald-50 via-teal-50 to-slate-50 rounded-2xl border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-2xs">
               <div className="flex items-center space-x-3">
@@ -798,7 +790,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                     </span>
                   </div>
                   <div className="text-[11px] text-slate-600 mt-0.5">
-                    Tất cả ảnh bữa ăn được lưu trực tiếp trên Google Drive của HLV và hiển thị qua link (không lưu ảnh nặng vào Database).
+                    Ảnh bữa ăn và dữ liệu đồng bộ trực tiếp với Google Drive của HLV.
                   </div>
                 </div>
               </div>
@@ -812,7 +804,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                     className="inline-flex items-center space-x-2 px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-800 font-bold rounded-xl border border-slate-300 shadow-xs transition-all text-xs cursor-pointer"
                   >
                     <Folder className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>{isConnectingDrive ? 'Đang kết nối...' : 'Tải Ảnh Từ Folder Học Viên'}</span>
+                    <span>{isConnectingDrive ? 'Đang kết nối...' : 'Kết Nối Google Drive'}</span>
                   </button>
                 ) : (
                   <button
@@ -822,7 +814,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                     className="px-3 py-2 bg-white hover:bg-emerald-50 text-emerald-800 font-bold rounded-xl border border-emerald-300 shadow-2xs transition-all text-xs cursor-pointer flex items-center space-x-1.5"
                   >
                     <Folder className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>{isLoadingDrivePhotos ? 'Đang lấy link ảnh...' : 'Làm Mới Link Ảnh Từ Drive'}</span>
+                    <span>{isLoadingDrivePhotos ? 'Đang lấy link ảnh...' : 'Làm Mới Ảnh Từ Drive'}</span>
                   </button>
                 )}
 
@@ -889,7 +881,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
           {studentMeals.length === 0 ? (
             <div className="py-16 text-center text-xs text-slate-400">
               <Utensils className="w-10 h-10 mx-auto text-slate-300 mb-2" />
-              Bạn chưa tải lên bữa ăn nào hôm nay. Bấm "Chụp / Tải Bữa Ăn Mới" để AI nhận diện calo ngay!
+              Bạn chưa tải lên bữa ăn nào hôm nay. Bấm "Chụp / Đẩy Ảnh Bữa Ăn Lên" để AI tính tổng Calo và gợi ý cải thiện bữa ăn!
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -904,7 +896,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                       />
                       <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded text-[9px] font-black bg-emerald-600/90 text-white backdrop-blur-xs flex items-center space-x-0.5 shadow-xs">
                         <Sparkles className="w-2.5 h-2.5 mr-0.5" />
-                        AI Vision
+                        AI
                       </span>
                     </div>
 
@@ -921,16 +913,16 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
 
                       <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] font-bold">
                         <span className="px-2 py-0.5 rounded bg-orange-100 text-orange-800">
-                          🔥 {m.estimatedCalories} Kcal
+                          🔥 Tổng Calo: {m.estimatedCalories} Kcal
                         </span>
                         <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800">
-                          🥩 Đạm {m.macros.protein}g
+                          Đạm {m.macros.protein}g
                         </span>
                         <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">
-                          🍚 Carb {m.macros.carbs}g
+                          Carb {m.macros.carbs}g
                         </span>
                         <span className="px-1.5 py-0.5 rounded bg-rose-100 text-rose-800">
-                          🥑 Béo {m.macros.fat}g
+                          Béo {m.macros.fat}g
                         </span>
                       </div>
                     </div>
@@ -940,7 +932,10 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                   {m.nutritionAdvice && (
                     <div className="p-2.5 bg-emerald-50 rounded-xl border border-emerald-200 text-[11px] text-emerald-950 font-medium flex items-start space-x-1.5">
                       <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
-                      <span>{m.nutritionAdvice}</span>
+                      <div>
+                        <span className="font-bold">Gợi ý & Lưu ý từ AI: </span>
+                        <span>{m.nutritionAdvice}</span>
+                      </div>
                     </div>
                   )}
 
@@ -1106,28 +1101,28 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
         <BeforeAfterViewer photos={studentPhotos} studentId={student.id} />
       )}
 
-      {/* Upload Meal Modal with AI Vision Scanner */}
+      {/* Upload Meal Modal with Direct AI Meal Photo Analysis */}
       {showMealModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
           <div className="bg-white rounded-3xl shadow-2xl max-w-lg w-full p-6 animate-in fade-in zoom-in-95 duration-150 my-6">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
               <div className="flex items-center space-x-2">
                 <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
-                  <Camera className="w-4 h-4" />
+                  <Sparkles className="w-4 h-4" />
                 </div>
                 <div>
                   <h4 className="font-extrabold text-slate-900 text-sm">
-                    Check-in Bữa Ăn (AI Nhận Diện Tự Động)
+                    AI Phân Tích Bữa Ăn Qua Ảnh Chụp
                   </h4>
                   <p className="text-[11px] text-slate-500">
-                    Chụp ảnh đĩa ăn, AI sẽ tự động ước tính Calo & Macro dinh dưỡng
+                    Chụp ảnh thức ăn hoặc đẩy ảnh lên để AI tính tổng Calo và gợi ý cải thiện bữa ăn
                   </p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setShowMealModal(false)}
-                className="w-7 h-7 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center text-xs font-bold"
+                className="w-7 h-7 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center text-xs font-bold cursor-pointer"
               >
                 ✕
               </button>
@@ -1144,7 +1139,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                       type="button"
                       onClick={() => {
                         setMealType(t);
-                        if (mealImage) triggerAIAnalysis(mealImage);
+                        if (mealImage) triggerAIAnalysis(mealImage, 'image/jpeg', '', '');
                       }}
                       className={`py-2 px-2 text-center rounded-xl font-bold transition-all text-xs cursor-pointer ${
                         mealType === t
@@ -1161,10 +1156,10 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
               {/* Photo Input & Dual Camera / Gallery Action */}
               <div>
                 <label className="block font-bold text-slate-700 mb-1.5 flex items-center justify-between">
-                  <span>Ảnh chụp đĩa ăn của bạn</span>
-                  <span className="text-[11px] text-emerald-700 font-semibold">Tự động nén & bóc tách AI</span>
+                  <span>Ảnh chụp thức ăn của bạn</span>
+                  <span className="text-[11px] text-emerald-700 font-semibold">AI tự động phân tích ngay khi chọn ảnh</span>
                 </label>
-                
+
                 {/* Hidden File pickers for Camera & Gallery */}
                 <input
                   ref={cameraInputRef}
@@ -1190,7 +1185,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                   }}
                 />
 
-                {/* Prominent Action Buttons: Camera vs Gallery */}
+                {/* Prominent Action Buttons: Camera vs Upload */}
                 <div className="grid grid-cols-2 gap-2 mb-3">
                   <button
                     type="button"
@@ -1198,7 +1193,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                     className="py-2.5 px-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl font-bold flex items-center justify-center space-x-2 cursor-pointer shadow-xs active:scale-98 transition-all"
                   >
                     <Camera className="w-4 h-4" />
-                    <span>Chụp Ảnh Bằng Camera</span>
+                    <span>Chụp Ảnh Thức Ăn</span>
                   </button>
                   <button
                     type="button"
@@ -1206,7 +1201,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                     className="py-2.5 px-3 bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold flex items-center justify-center space-x-2 cursor-pointer shadow-xs active:scale-98 transition-all"
                   >
                     <Upload className="w-4 h-4" />
-                    <span>Tải Ảnh Từ Máy</span>
+                    <span>Đẩy Ảnh Từ Máy Lên</span>
                   </button>
                 </div>
 
@@ -1230,6 +1225,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                           setFat('');
                           setNutritionAdvice('');
                           setNutritionScore(null);
+                          setHealthTags([]);
                           setAnalyzeSuccess(false);
                           setAnalyzeError('');
                           if (cameraInputRef.current) cameraInputRef.current.value = '';
@@ -1238,146 +1234,135 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                         className="absolute top-2 right-2 bg-rose-600/90 hover:bg-rose-700 text-white backdrop-blur-xs px-2.5 py-1 rounded-xl text-[10px] font-bold flex items-center space-x-1 shadow-md cursor-pointer z-20"
                       >
                         <Trash2 className="w-3 h-3" />
-                        <span>Xóa ảnh</span>
+                        <span>Đổi ảnh khác</span>
                       </button>
                     </>
                   ) : (
-                    <div className="flex flex-col items-center justify-center p-6 text-center text-slate-400">
+                    <div
+                      onClick={() => galleryInputRef.current?.click()}
+                      className="flex flex-col items-center justify-center p-6 text-center text-slate-400 cursor-pointer hover:bg-slate-100/70 transition-colors w-full h-full"
+                    >
                       <div className="w-12 h-12 rounded-2xl bg-emerald-100/80 text-emerald-600 flex items-center justify-center mb-2">
                         <Camera className="w-6 h-6" />
                       </div>
-                      <p className="font-bold text-slate-700 text-xs">Chưa có ảnh bữa ăn</p>
+                      <p className="font-bold text-slate-700 text-xs">
+                        Bấm để chụp ảnh hoặc đẩy ảnh thức ăn lên
+                      </p>
                       <p className="text-[11px] text-slate-400 mt-0.5 max-w-xs">
-                        Chỉ cần bấm "Chụp Ảnh Bằng Camera" hoặc "Tải Ảnh Từ Máy", AI sẽ tự động phân tích món ăn, tổng Calo và gợi ý dinh dưỡng.
+                        AI sẽ tự động phân tích bữa ăn, đưa ra tổng lượng Calo của món ăn và gợi ý cải thiện bữa ăn / lưu ý dinh dưỡng.
                       </p>
                     </div>
                   )}
 
-                  {/* Laser Scanning Animation Beam */}
+                  {/* Scanning Animation Overlay */}
                   {isAnalyzing && (
-                    <div className="absolute inset-0 bg-emerald-950/75 backdrop-blur-xs flex flex-col items-center justify-center p-4 text-center z-10 animate-in fade-in">
+                    <div className="absolute inset-0 bg-emerald-950/80 backdrop-blur-xs flex flex-col items-center justify-center p-4 text-center z-10 animate-in fade-in">
                       <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-400 flex items-center justify-center mb-3 animate-pulse">
                         <Loader2 className="w-6 h-6 text-emerald-400 animate-spin" />
                       </div>
                       <div className="font-extrabold text-white text-sm">
-                        Gemini AI Đang Phân Tích Đĩa Ăn...
+                        AI Đang Phân Tích Bữa Ăn Của Bạn...
                       </div>
                       <div className="text-[11px] text-emerald-300 mt-1 max-w-xs">
-                        Đang nhận diện món ăn, ước tính tổng Calo, Macro và đưa ra gợi ý cải thiện bữa ăn
+                        Đang tính tổng lượng Calo và tổng hợp gợi ý cải thiện bữa ăn...
                       </div>
                     </div>
                   )}
 
                   {!isAnalyzing && analyzeSuccess && mealImage && (
-                    <div className="absolute top-2 left-2 bg-emerald-600/90 text-white backdrop-blur-xs px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center space-x-1 shadow-md">
+                    <div className="absolute top-2 left-2 bg-emerald-600/95 text-white backdrop-blur-xs px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center space-x-1 shadow-md">
                       <Check className="w-3 h-3" />
-                      <span>AI đã phân tích bữa ăn thành công</span>
+                      <span>AI đã phân tích xong</span>
                     </div>
                   )}
 
                   {analyzeError && (
-                    <div className="absolute bottom-2 inset-x-2 bg-rose-600/90 text-white backdrop-blur-xs px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-center shadow-md">
+                    <div className="absolute bottom-2 inset-x-2 bg-rose-600/95 text-white backdrop-blur-xs px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-center shadow-md">
                       {analyzeError}
                     </div>
                   )}
                 </div>
               </div>
 
-              {/* AI Identified Description */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="font-bold text-slate-700">
-                    Món ăn & Thành phần (AI tự động nhận diện từ ảnh)
-                  </label>
-                  {nutritionScore && (
-                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
-                      Điểm dinh dưỡng: {nutritionScore}/10
-                    </span>
-                  )}
-                </div>
-                <textarea
-                  rows={2}
-                  required
-                  placeholder="Tự động điền sau khi bạn chụp hoặc tải ảnh bữa ăn..."
-                  value={foodDesc}
-                  onChange={(e) => setFoodDesc(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-xl outline-hidden text-slate-800 font-medium focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
+              {/* AI Analysis Result Panel: Shown prominently after photo upload */}
+              {(mealImage || foodDesc || calories) && (
+                <div className="space-y-3 rounded-2xl bg-gradient-to-br from-emerald-50/90 via-teal-50/60 to-slate-50 p-4 border-2 border-emerald-200 shadow-xs">
+                  {/* 1. Prominent Total Calories Banner */}
+                  <div className="flex items-center justify-between bg-white p-3.5 rounded-2xl border border-orange-200 shadow-2xs">
+                    <div className="flex items-center space-x-2.5">
+                      <div className="w-10 h-10 rounded-xl bg-orange-100 text-orange-600 flex items-center justify-center shrink-0">
+                        <Flame className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-extrabold uppercase tracking-wider text-orange-700">
+                          Tổng Năng Lượng Bữa Ăn (AI Tính Toán)
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          Đạm: <strong>{protein || 0}g</strong> • Tinh bột: <strong>{carbs || 0}g</strong> • Béo: <strong>{fat || 0}g</strong>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="text-right flex items-baseline space-x-1">
+                      <input
+                        type="number"
+                        required
+                        value={calories}
+                        onChange={(e) => setCalories(e.target.value)}
+                        className="w-20 font-black text-2xl text-orange-600 text-right bg-transparent border-b border-dashed border-orange-300 focus:outline-hidden"
+                      />
+                      <span className="font-extrabold text-xs text-orange-700">Kcal</span>
+                    </div>
+                  </div>
 
-              {/* AI Macro Output Badges */}
-              <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200">
-                <div className="text-[10px] uppercase tracking-wider font-extrabold text-slate-400 mb-2">
-                  Chỉ số dinh dưỡng AI ước tính (Kcal & Macros)
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  <div className="bg-white p-2 rounded-xl border border-orange-200 shadow-2xs text-center">
-                    <span className="text-[10px] font-bold text-orange-600">Calo (Kcal)</span>
-                    <input
-                      type="number"
+                  {/* 2. Detected Meal Components */}
+                  <div className="bg-white p-3 rounded-xl border border-slate-200/90">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-bold text-slate-800 text-[11px] flex items-center">
+                        <Utensils className="w-3.5 h-3.5 mr-1 text-emerald-600" />
+                        Thông tin món ăn AI nhận diện từ ảnh:
+                      </span>
+                      {nutritionScore && (
+                        <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">
+                          Điểm: {nutritionScore}/10
+                        </span>
+                      )}
+                    </div>
+                    <textarea
+                      rows={2}
                       required
-                      value={calories}
-                      onChange={(e) => setCalories(e.target.value)}
-                      className="w-full font-black text-slate-900 text-center text-sm outline-hidden mt-0.5"
+                      value={foodDesc}
+                      onChange={(e) => setFoodDesc(e.target.value)}
+                      className="w-full text-xs text-slate-800 font-semibold bg-slate-50/70 p-2 rounded-lg border border-slate-200 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
                     />
                   </div>
 
-                  <div className="bg-white p-2 rounded-xl border border-blue-200 shadow-2xs text-center">
-                    <span className="text-[10px] font-bold text-blue-600">Đạm (g)</span>
-                    <input
-                      type="number"
-                      required
-                      value={protein}
-                      onChange={(e) => setProtein(e.target.value)}
-                      className="w-full font-black text-slate-900 text-center text-sm outline-hidden mt-0.5"
+                  {/* 3. AI Meal Improvement Suggestions & Notes */}
+                  <div className="bg-white p-3.5 rounded-xl border border-emerald-300 shadow-2xs">
+                    <div className="font-extrabold text-emerald-900 text-xs flex items-center space-x-1.5 mb-1.5">
+                      <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>Gợi Ý Cải Thiện Bữa Ăn & Lưu Ý Từ AI:</span>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={nutritionAdvice}
+                      onChange={(e) => setNutritionAdvice(e.target.value)}
+                      className="w-full text-xs text-emerald-950 font-medium leading-relaxed bg-emerald-50/50 p-2.5 rounded-lg border border-emerald-200 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
                     />
+                    {healthTags.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {healthTags.map((tag, idx) => (
+                          <span
+                            key={idx}
+                            className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800"
+                          >
+                            ✓ {tag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
-
-                  <div className="bg-white p-2 rounded-xl border border-amber-200 shadow-2xs text-center">
-                    <span className="text-[10px] font-bold text-amber-600">Carb (g)</span>
-                    <input
-                      type="number"
-                      required
-                      value={carbs}
-                      onChange={(e) => setCarbs(e.target.value)}
-                      className="w-full font-black text-slate-900 text-center text-sm outline-hidden mt-0.5"
-                    />
-                  </div>
-
-                  <div className="bg-white p-2 rounded-xl border border-rose-200 shadow-2xs text-center">
-                    <span className="text-[10px] font-bold text-rose-600">Fat (g)</span>
-                    <input
-                      type="number"
-                      required
-                      value={fat}
-                      onChange={(e) => setFat(e.target.value)}
-                      className="w-full font-black text-slate-900 text-center text-sm outline-hidden mt-0.5"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* AI Advice & Nutrition Highlights */}
-              {nutritionAdvice && (
-                <div className="p-3 bg-emerald-50 rounded-2xl border border-emerald-200 text-[11px] text-emerald-950">
-                  <div className="font-bold flex items-center space-x-1 text-emerald-900 mb-1">
-                    <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Đánh giá từ Trợ lý Dinh dưỡng AI:</span>
-                  </div>
-                  <p className="font-medium leading-relaxed">{nutritionAdvice}</p>
                 </div>
               )}
-
-              {/* Google Drive Link Notice */}
-              <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-[11px] text-slate-600 flex items-center justify-between">
-                <div className="flex items-center space-x-1.5 truncate">
-                  <Folder className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span className="truncate">
-                    Lưu trữ vào: <strong>FitTrack_{student.fullName.replace(/\s+/g, '_')}_{student.id}</strong>
-                  </span>
-                </div>
-                <span className="text-emerald-700 font-bold shrink-0 text-[10px]">Google Drive</span>
-              </div>
 
               {/* Action Buttons */}
               <div className="pt-2 flex justify-end space-x-2.5">
@@ -1390,11 +1375,11 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isAnalyzing || isUploadingToDrive}
+                  disabled={isAnalyzing || isUploadingToDrive || !mealImage}
                   className="px-5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl font-bold shadow-md cursor-pointer disabled:opacity-50 flex items-center space-x-1.5"
                 >
                   <Check className="w-4 h-4" />
-                  <span>{isUploadingToDrive ? 'Đang lưu ảnh vào Drive...' : 'Lưu Bữa Ăn & Ảnh Vào Drive'}</span>
+                  <span>{isUploadingToDrive ? 'Đang lưu...' : 'Lưu Bữa Ăn Vào Hệ Thống'}</span>
                 </button>
               </div>
             </form>

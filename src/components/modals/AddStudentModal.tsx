@@ -53,12 +53,11 @@ export const AddStudentModal: React.FC<AddStudentModalProps> = ({
   const [initialPassword, setInitialPassword] = useState('123');
 
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const validatePhone = (p: string) => {
-    // VN Regex: ^(03|05|07|08|09)+([0-9]{8})$ or (03|5|7|8|9)
-    const cleaned = p.replace(/\s+/g, '');
-    const regex = /^(03|05|07|08|09)[0-9]{8}$/;
-    return regex.test(cleaned);
+    const cleaned = p.replace(/[\s.-]+/g, '');
+    return cleaned.length >= 6 && cleaned.length <= 15;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -74,18 +73,17 @@ export const AddStudentModal: React.FC<AddStudentModalProps> = ({
       newErrors.age = 'Tuổi phải từ 1 đến 120';
     }
 
-    const heightNum = parseFloat(height);
+    const heightNum = parseFloat(height.replace(',', '.'));
     if (isNaN(heightNum) || heightNum < 0.5 || heightNum > 2.5) {
-      newErrors.height = 'Chiều cao phải từ 0.50m đến 2.50m (Ví dụ: 1.75)';
+      newErrors.height = 'Chiều cao phải từ 0.50m đến 2.50m (Ví dụ: 1.70)';
     }
 
     if (!validatePhone(phone)) {
-      newErrors.phone = 'Số điện thoại không hợp lệ (Chuẩn VN: 10 chữ số bắt đầu bằng 03, 05, 07, 08, 09)';
+      newErrors.phone = 'Vui lòng nhập số điện thoại hợp lệ (từ 6 đến 15 số)';
     }
 
-    if (!healthGoal.trim() || healthGoal.length > 500) {
-      newErrors.healthGoal = 'Mục tiêu sức khỏe tối đa 500 ký tự và là trường bắt buộc';
-    }
+    const finalGoal =
+      healthGoal.trim() || 'Cân đối vóc dáng, giảm mỡ nội tạng và cải thiện sức khỏe toàn diện';
 
     if (Object.keys(newErrors).length > 0) {
       setErrors(newErrors);
@@ -99,38 +97,44 @@ export const AddStudentModal: React.FC<AddStudentModalProps> = ({
       targetWaist: targetWaist ? parseFloat(targetWaist) : undefined,
     };
 
-    if (initialStudent) {
-      await updateStudent({
-        ...initialStudent,
-        fullName: fullName.trim(),
-        gender,
-        age: ageNum,
-        height: heightNum,
-        phone: phone.trim(),
-        address: address.trim(),
-        dateOfBirth,
-        healthGoal: healthGoal.trim(),
-        targetMetrics,
-        avatarUrl,
-      });
-    } else {
-      await addStudent({
-        fullName: fullName.trim(),
-        gender,
-        age: ageNum,
-        height: heightNum,
-        phone: phone.trim(),
-        address: address.trim(),
-        dateOfBirth,
-        healthGoal: healthGoal.trim(),
-        targetMetrics,
-        avatarUrl,
-        initialUsername: initialUsername.trim() || phone.trim(),
-        initialPassword: initialPassword.trim() || '123',
-      });
+    try {
+      setIsSubmitting(true);
+      if (initialStudent) {
+        await updateStudent({
+          ...initialStudent,
+          fullName: fullName.trim(),
+          gender,
+          age: ageNum,
+          height: heightNum,
+          phone: phone.trim(),
+          address: address.trim(),
+          dateOfBirth: dateOfBirth || '2000-01-01',
+          healthGoal: finalGoal,
+          targetMetrics,
+          avatarUrl,
+        });
+      } else {
+        await addStudent({
+          fullName: fullName.trim(),
+          gender,
+          age: ageNum,
+          height: heightNum,
+          phone: phone.trim(),
+          address: address.trim(),
+          dateOfBirth: dateOfBirth || '2000-01-01',
+          healthGoal: finalGoal,
+          targetMetrics,
+          avatarUrl,
+          initialUsername: initialUsername.trim() || phone.trim(),
+          initialPassword: initialPassword.trim() || '123',
+        });
+      }
+      onClose();
+    } catch (err: any) {
+      setErrors({ submit: err?.message || 'Không thể lưu học viên. Vui lòng thử lại.' });
+    } finally {
+      setIsSubmitting(false);
     }
-
-    onClose();
   };
 
   return (
@@ -267,11 +271,10 @@ export const AddStudentModal: React.FC<AddStudentModalProps> = ({
           {/* Health Goal */}
           <div>
             <label className="block font-semibold text-slate-700 mb-1">
-              Mục tiêu sức khỏe * <span className="text-slate-400 font-normal">(Baseline Target - Tối đa 500 ký tự)</span>
+              Mục tiêu sức khỏe <span className="text-slate-400 font-normal">(Baseline Target - Tối đa 500 ký tự)</span>
             </label>
             <textarea
               rows={2}
-              required
               placeholder="Ví dụ: Giảm 5kg mỡ, hạ mỡ nội tạng từ cấp 10 xuống cấp 6, siết cơ bụng..."
               value={healthGoal}
               onChange={(e) => setHealthGoal(e.target.value)}
@@ -382,27 +385,34 @@ export const AddStudentModal: React.FC<AddStudentModalProps> = ({
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Ảnh đại diện (URL)</label>
             <input
-              type="url"
+              type="text"
               value={avatarUrl}
               onChange={(e) => setAvatarUrl(e.target.value)}
               className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-hidden font-mono text-xs"
             />
           </div>
 
+          {Object.keys(errors).length > 0 && (
+            <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold">
+              {Object.values(errors)[0]}
+            </div>
+          )}
+
           {/* Form Actions */}
           <div className="pt-3 border-t border-slate-100 flex items-center justify-end space-x-2">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 border border-slate-200 rounded-xl font-semibold text-slate-600 hover:bg-slate-50 transition-colors"
+              className="px-4 py-2 border border-slate-200 rounded-xl font-semibold text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer"
             >
               Hủy
             </button>
             <button
               type="submit"
-              className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold transition-colors shadow-xs"
+              disabled={isSubmitting}
+              className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold transition-colors shadow-xs cursor-pointer disabled:opacity-50"
             >
-              {initialStudent ? 'Lưu Thay Đổi' : 'Tạo Học Viên'}
+              {isSubmitting ? 'Đang lưu...' : initialStudent ? 'Lưu Thay Đổi' : 'Tạo Học Viên'}
             </button>
           </div>
         </form>
