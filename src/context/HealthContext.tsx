@@ -1008,8 +1008,6 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     dishHint?: string;
     fileName?: string;
   }) => {
-    // Always compute client-side visual pixel analysis on the actual image so if running on GitHub Pages
-    // or if the server falls back, we have exact canvas-based visual analysis of the food photo
     const visualAnalysisPromise = analyzeFoodImageVisuals(params.imageBase64, {
       mealType: params.mealType,
       studentGoal: params.studentGoal,
@@ -1040,18 +1038,18 @@ export const HealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         return await visualAnalysisPromise;
       }
 
-      if (!res.ok || !data?.analysis) {
-        return await visualAnalysisPromise;
+      if (res.ok && data?.analysis && data.analysis.analysisSource === 'gemini-ai') {
+        return data.analysis;
       }
 
-      // If the server used its non-canvas byte fallback (because GEMINI_API_KEY wasn't set in env),
-      // prefer the browser's true HTML5 Canvas pixel vision analysis!
-      return await visualAnalysisPromise.then((canvasResult) => {
-        if (data.analysis && data.analysis.geminiModelUsed) {
-          return data.analysis;
-        }
-        return canvasResult || data.analysis;
-      });
+      const canvasResult = await visualAnalysisPromise;
+      if (data?.geminiErrorHint) {
+        return {
+          ...canvasResult,
+          geminiErrorHint: data.geminiErrorHint,
+        };
+      }
+      return canvasResult;
     } catch {
       return await visualAnalysisPromise;
     }

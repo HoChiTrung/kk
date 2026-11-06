@@ -3,7 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MealItem } from '../types/health';
+
 export interface MealAnalysisResult {
+  isFood: boolean;
+  nonFoodReason?: string;
+  analysisSource?: 'gemini-ai' | 'vision-canvas';
+  geminiErrorHint?: string;
   foodDescription: string;
   estimatedCalories: number;
   macros: {
@@ -11,12 +17,14 @@ export interface MealAnalysisResult {
     carbs: number;
     fat: number;
   };
+  items: MealItem[];
   nutritionScore: number;
   advice: string;
   healthTags: string[];
 }
 
-interface VisualFeatures {
+export interface VisualFeatures {
+  hasCanvasData: boolean;
   greenRatio: number;
   whiteStarchRatio: number;
   brownProteinRatio: number;
@@ -25,15 +33,22 @@ interface VisualFeatures {
   warmBrothRatio: number;
   darkSauceRatio: number;
   creamyLightRatio: number;
+  coolNonFoodRatio: number;
+  paperGrayRatio: number;
+  sharpJumpsRatio: number;
+  inkNextToPaperRatio: number;
+  signReversalsRatio: number;
+  flatPixelRatio: number;
+  centerFoodRatio: number;
+  borderInkRatio: number;
   brightness: number;
   saturation: number;
   portionDensity: number;
-  signature: number;
 }
 
 /**
- * Extracts real visual pixel statistics from a Base64 food photo using HTML5 Canvas
- * (or deterministic byte-distribution analysis if running outside a browser DOM).
+ * Extracts real pixel-level computer vision features and edge/text statistics
+ * from a Base64 image using HTML5 Canvas.
  */
 export async function extractImageVisualFeatures(imageBase64: string): Promise<VisualFeatures> {
   if (typeof window !== 'undefined' && typeof document !== 'undefined') {
@@ -50,7 +65,7 @@ export async function extractImageVisualFeatures(imageBase64: string): Promise<V
         el.src = dataUrl;
       });
 
-      const size = 64;
+      const size = 96;
       const canvas = document.createElement('canvas');
       canvas.width = size;
       canvas.height = size;
@@ -68,25 +83,36 @@ export async function extractImageVisualFeatures(imageBase64: string): Promise<V
         let warmBrothCount = 0;
         let darkSauceCount = 0;
         let creamyLightCount = 0;
-        let foodPixels = 0;
+        let coolNonFoodCount = 0;
+        let paperGrayCount = 0;
+
+        let sharpJumps = 0;
+        let inkNextToPaper = 0;
+        let signReversals = 0;
+        let flatPixels = 0;
+        let centerFoodPixels = 0;
+        let borderInkPixels = 0;
+
         let totalBrightness = 0;
         let totalSaturation = 0;
-        let signature = 0;
 
         const totalPixels = size * size;
+        const lumGrid = new Float32Array(totalPixels);
+        const satGrid = new Float32Array(totalPixels);
 
         for (let y = 0; y < size; y++) {
           for (let x = 0; x < size; x++) {
-            const idx = (y * size + x) * 4;
+            const pIdx = y * size + x;
+            const idx = pIdx * 4;
             const r = data[idx];
             const g = data[idx + 1];
             const b = data[idx + 2];
 
-            // Focus slightly higher weight on center 75% of the frame where the plate/bowl sits
             const dx = (x - size / 2) / (size / 2);
             const dy = (y - size / 2) / (size / 2);
             const distSq = dx * dx + dy * dy;
-            const weight = distSq < 0.65 ? 1.25 : 0.75;
+            const isCenter = distSq < 0.6;
+            const weight = isCenter ? 1.2 : 0.8;
 
             const max = Math.max(r, g, b);
             const min = Math.min(r, g, b);
@@ -94,11 +120,12 @@ export async function extractImageVisualFeatures(imageBase64: string): Promise<V
             const lum = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
             const sat = max === 0 ? 0 : delta / max;
 
+            lumGrid[pIdx] = lum;
+            satGrid[pIdx] = sat;
+
             totalBrightness += lum;
             totalSaturation += sat;
-            signature = (signature * 31 + r * 3 + g * 5 + b * 7) % 1000003;
 
-            // Calculate Hue (0 - 360)
             let hue = 0;
             if (delta !== 0) {
               if (max === r) {
@@ -112,103 +139,170 @@ export async function extractImageVisualFeatures(imageBase64: string): Promise<V
               if (hue < 0) hue += 360;
             }
 
-            // Detect leafy greens / vegetables (hue 70..165, moderate saturation)
-            if (hue >= 68 && hue <= 168 && sat >= 0.15 && lum > 0.12 && lum < 0.88) {
+            // Paper / gray background detection
+            if (sat < 0.16 && lum > 0.64) {
+              paperGrayCount++;
+            }
+
+            // Border ink/text detection (tables & documents have text/lines near edges)
+            if (distSq > 0.65 && lum < 0.32 && sat < 0.25) {
+              borderInkPixels++;
+            }
+
+            // Cool non-food colors (blue, cyan, indigo, violet, magenta UI/charts)
+            if (hue >= 175 && hue <= 325 && sat >= 0.22 && lum > 0.15 && lum < 0.9) {
+              coolNonFoodCount += 1;
+            }
+            // Leafy greens / vegetables (hue 72..165)
+            else if (hue >= 72 && hue <= 165 && sat >= 0.18 && lum > 0.14 && lum < 0.85) {
               greenCount += weight;
-              foodPixels += weight;
+              if (isCenter) centerFoodPixels++;
             }
-            // Detect white rice / rice noodles / egg whites / tofu (high luminance, low saturation)
-            else if (lum >= 0.72 && lum <= 0.96 && sat <= 0.18 && distSq < 0.55) {
-              whiteStarchCount += weight;
-              foodPixels += weight;
-            }
-            // Detect creamy / oats / yogurt / light broth (warm off-white)
-            else if (lum >= 0.62 && lum < 0.85 && sat > 0.08 && sat <= 0.28 && hue >= 25 && hue <= 60) {
-              creamyLightCount += weight;
-              foodPixels += weight;
-            }
-            // Detect golden fried / egg yolk / roasted skin / sweet potato (hue 35..65, high sat)
-            else if (hue >= 34 && hue <= 66 && sat >= 0.32 && lum >= 0.35 && lum <= 0.88) {
+            // Golden fried / egg yolk / roasted skin / turmeric (hue 34..64, higher saturation)
+            else if (hue >= 34 && hue <= 64 && sat >= 0.34 && lum >= 0.34 && lum <= 0.86) {
               goldenFriedCount += weight;
-              foodPixels += weight;
+              if (isCenter) centerFoodPixels++;
             }
-            // Detect orange-red (salmon, tomato, shrimp, chili, carrot, papaya, beef)
-            else if ((hue <= 22 || hue >= 340) && sat >= 0.32 && lum >= 0.22 && lum <= 0.82) {
+            // Orange-red (salmon, tomato, shrimp, carrot, beef, chili sauce)
+            else if ((hue <= 22 || hue >= 342) && sat >= 0.32 && lum >= 0.2 && lum <= 0.82) {
               orangeRedCount += weight;
-              foodPixels += weight;
+              if (isCenter) centerFoodPixels++;
             }
-            // Detect grilled / pan-seared / braised protein (brownish warm hues 15..42, medium lum)
-            else if (hue >= 14 && hue <= 44 && sat >= 0.18 && sat <= 0.65 && lum >= 0.18 && lum <= 0.62) {
+            // Grilled / pan-seared / braised protein (warm brown 14..42, medium lum)
+            else if (hue >= 14 && hue <= 42 && sat >= 0.2 && sat <= 0.68 && lum >= 0.18 && lum <= 0.6) {
               brownProteinCount += weight;
-              foodPixels += weight;
+              if (isCenter) centerFoodPixels++;
             }
-            // Detect warm soup broth (amber/tan liquid tones)
-            else if (hue >= 22 && hue <= 52 && sat >= 0.12 && sat < 0.35 && lum >= 0.35 && lum <= 0.72) {
+            // Warm soup broth (amber/tan liquid tones)
+            else if (hue >= 22 && hue <= 50 && sat >= 0.14 && sat < 0.34 && lum >= 0.36 && lum <= 0.72) {
               warmBrothCount += weight;
-              foodPixels += weight;
+              if (isCenter) centerFoodPixels++;
             }
-            // Detect dark braised sauce / black pepper / dark meat
-            else if (lum >= 0.08 && lum < 0.25 && distSq < 0.55) {
+            // Creamy / oats / yogurt / light broth (warm off-white)
+            else if (lum >= 0.64 && lum < 0.86 && sat >= 0.09 && sat <= 0.28 && hue >= 25 && hue <= 58) {
+              creamyLightCount += weight;
+              if (isCenter) centerFoodPixels++;
+            }
+            // White rice / rice noodles / egg white / tofu inside center plate area
+            else if (lum >= 0.72 && lum <= 0.95 && sat <= 0.16 && distSq < 0.45) {
+              whiteStarchCount += weight;
+            }
+            // Dark braised sauce / dark meat in center
+            else if (lum >= 0.1 && lum < 0.25 && sat >= 0.15 && distSq < 0.45) {
               darkSauceCount += weight;
-              foodPixels += weight;
+              if (isCenter) centerFoodPixels++;
             }
           }
         }
 
-        const norm = totalPixels;
-        const portionDensity = Math.min(1, Math.max(0.35, foodPixels / (norm * 0.85)));
+        // Scan horizontally & vertically for high-frequency text strokes, table grid lines, and flat digital blocks
+        for (let y = 0; y < size; y++) {
+          let prevDiffX = 0;
+          for (let x = 1; x < size; x++) {
+            const curr = lumGrid[y * size + x];
+            const prev = lumGrid[y * size + (x - 1)];
+            const diff = curr - prev;
+
+            if (Math.abs(diff) > 0.16) sharpJumps++;
+            if (Math.abs(diff) < 0.008) flatPixels++;
+            if ((curr < 0.36 && prev > 0.52) || (curr > 0.52 && prev < 0.36)) {
+              inkNextToPaper++;
+            }
+            if (Math.abs(diff) > 0.1 && Math.abs(prevDiffX) > 0.1 && diff * prevDiffX < 0) {
+              signReversals++;
+            }
+            prevDiffX = diff;
+          }
+        }
+
+        for (let x = 0; x < size; x++) {
+          let prevDiffY = 0;
+          for (let y = 1; y < size; y++) {
+            const curr = lumGrid[y * size + x];
+            const prev = lumGrid[(y - 1) * size + x];
+            const diff = curr - prev;
+
+            if (Math.abs(diff) > 0.16) sharpJumps++;
+            if ((curr < 0.36 && prev > 0.52) || (curr > 0.52 && prev < 0.36)) {
+              inkNextToPaper++;
+            }
+            if (Math.abs(diff) > 0.1 && Math.abs(prevDiffY) > 0.1 && diff * prevDiffY < 0) {
+              signReversals++;
+            }
+            prevDiffY = diff;
+          }
+        }
+
+        const edgeComparisons = size * (size - 1) * 2;
+        const organicFoodSum =
+          greenCount +
+          brownProteinCount +
+          orangeRedCount +
+          goldenFriedCount +
+          warmBrothCount +
+          creamyLightCount +
+          whiteStarchCount * 0.6;
+
+        const portionDensity = Math.min(1, Math.max(0.25, organicFoodSum / (totalPixels * 0.75)));
 
         return {
-          greenRatio: greenCount / norm,
-          whiteStarchRatio: whiteStarchCount / norm,
-          brownProteinRatio: brownProteinCount / norm,
-          orangeRedRatio: orangeRedCount / norm,
-          goldenFriedRatio: goldenFriedCount / norm,
-          warmBrothRatio: warmBrothCount / norm,
-          darkSauceRatio: darkSauceCount / norm,
-          creamyLightRatio: creamyLightCount / norm,
-          brightness: totalBrightness / norm,
-          saturation: totalSaturation / norm,
+          hasCanvasData: true,
+          greenRatio: greenCount / totalPixels,
+          whiteStarchRatio: whiteStarchCount / totalPixels,
+          brownProteinRatio: brownProteinCount / totalPixels,
+          orangeRedRatio: orangeRedCount / totalPixels,
+          goldenFriedRatio: goldenFriedCount / totalPixels,
+          warmBrothRatio: warmBrothCount / totalPixels,
+          darkSauceRatio: darkSauceCount / totalPixels,
+          creamyLightRatio: creamyLightCount / totalPixels,
+          coolNonFoodRatio: coolNonFoodCount / totalPixels,
+          paperGrayRatio: paperGrayCount / totalPixels,
+          sharpJumpsRatio: sharpJumps / edgeComparisons,
+          inkNextToPaperRatio: inkNextToPaper / edgeComparisons,
+          signReversalsRatio: signReversals / edgeComparisons,
+          flatPixelRatio: flatPixels / (size * (size - 1)),
+          centerFoodRatio: centerFoodPixels / (totalPixels * 0.6),
+          borderInkRatio: borderInkPixels / (totalPixels * 0.35),
+          brightness: totalBrightness / totalPixels,
+          saturation: totalSaturation / totalPixels,
           portionDensity,
-          signature,
         };
       }
     } catch {
-      // Fallback to byte signature below if image decode fails
+      // Fall through if Canvas decode fails
     }
   }
 
-  // Deterministic byte-level fallback (e.g. on Node server without Canvas)
-  const clean = imageBase64.replace(/^data:image\/\w+;base64,/, '').trim();
-  let sig = 0;
-  const step = Math.max(1, Math.floor(clean.length / 500));
-  for (let i = 0; i < clean.length; i += step) {
-    sig = (sig * 33 + clean.charCodeAt(i)) % 1000003;
-  }
-
-  const r1 = (sig % 100) / 100;
-  const r2 = ((sig >> 4) % 100) / 100;
-  const r3 = ((sig >> 8) % 100) / 100;
-
   return {
-    greenRatio: 0.05 + r1 * 0.22,
-    whiteStarchRatio: 0.12 + r2 * 0.28,
-    brownProteinRatio: 0.14 + r3 * 0.25,
-    orangeRedRatio: 0.04 + ((r1 + r2) % 0.2),
-    goldenFriedRatio: 0.05 + ((r2 + r3) % 0.22),
-    warmBrothRatio: 0.06 + ((r1 + r3) % 0.25),
-    darkSauceRatio: 0.04 + (r1 * 0.1),
-    creamyLightRatio: 0.05 + (r2 * 0.15),
-    brightness: 0.55,
-    saturation: 0.38,
-    portionDensity: 0.65 + (r3 * 0.25),
-    signature: sig,
+    hasCanvasData: false,
+    greenRatio: 0,
+    whiteStarchRatio: 0,
+    brownProteinRatio: 0,
+    orangeRedRatio: 0,
+    goldenFriedRatio: 0,
+    warmBrothRatio: 0,
+    darkSauceRatio: 0,
+    creamyLightRatio: 0,
+    coolNonFoodRatio: 0,
+    paperGrayRatio: 0,
+    sharpJumpsRatio: 0,
+    inkNextToPaperRatio: 0,
+    signReversalsRatio: 0,
+    flatPixelRatio: 0,
+    centerFoodRatio: 0,
+    borderInkRatio: 0,
+    brightness: 0.5,
+    saturation: 0.3,
+    portionDensity: 0.5,
   };
 }
 
 /**
- * Analyzes a food photo's visual features and context to produce accurate total calories,
- * detected food description, macro breakdown, and actionable meal improvement advice/notes.
+ * Analyzes an uploaded image to determine:
+ * 1) Whether the image is actually a food/meal photo (rejecting tables, charts, text documents, screenshots, etc.)
+ * 2) Total calories, total protein, carbs, fat
+ * 3) Individual dish/ingredient breakdown (`items`: name, portion, calories, protein, carbs, fat)
+ * 4) Tailored nutritional advice
  */
 export async function analyzeFoodImageVisuals(
   imageBase64: string,
@@ -221,10 +315,22 @@ export async function analyzeFoodImageVisuals(
   const features = await extractImageVisualFeatures(imageBase64);
   const mealType = options.mealType || 'Bữa trưa';
   const goal = options.studentGoal || 'Cân đối vóc dáng & Cải thiện sức khỏe';
-  const cleanFileName = (options.fileName || '')
-    .replace(/\.[^/.]+$/, '')
-    .replace(/[_-]+/g, ' ')
-    .toLowerCase();
+
+  if (!features.hasCanvasData) {
+    return {
+      isFood: false,
+      nonFoodReason:
+        'Không thể giải mã trực tiếp dữ liệu điểm ảnh trên máy chủ khi chưa cấu hình GEMINI_API_KEY hợp lệ.',
+      analysisSource: 'vision-canvas',
+      foodDescription: '',
+      estimatedCalories: 0,
+      macros: { protein: 0, carbs: 0, fat: 0 },
+      items: [],
+      nutritionScore: 0,
+      advice: '',
+      healthTags: [],
+    };
+  }
 
   const {
     greenRatio,
@@ -234,241 +340,330 @@ export async function analyzeFoodImageVisuals(
     goldenFriedRatio,
     warmBrothRatio,
     creamyLightRatio,
-    portionDensity,
-    signature,
+    coolNonFoodRatio,
+    paperGrayRatio,
+    sharpJumpsRatio,
+    inkNextToPaperRatio,
+    signReversalsRatio,
+    flatPixelRatio,
+    centerFoodRatio,
+    borderInkRatio,
+    saturation,
   } = features;
 
-  // Determine portion scale factor (0.88x to 1.16x) from actual visual food density
-  const portionScale = 0.88 + portionDensity * 0.28;
-  // Deterministic fine variance (-15 to +15 kcal) so distinct photos have exact custom calorie counts
-  const fineCalorieOffset = (signature % 7) * 5 - 15;
+  // ============================================================================
+  // STAGE 1: STRICT NON-FOOD / DOCUMENT / TABLE / SCREENSHOT / CHART REJECTION
+  // ============================================================================
 
-  let baseDescription = '';
-  let baseCalories = 480;
-  let baseProtein = 34;
-  let baseCarbs = 52;
-  let baseFat = 14;
-  let score = 8.5;
+  // 1A. Detect printed tables, reference charts, InBody sheets, text documents, spreadsheets
+  // Printed tables/text have high ink-next-to-paper transitions and rapid high-frequency sign reversals
+  const isDocumentOrTable =
+    inkNextToPaperRatio >= 0.042 ||
+    (signReversalsRatio >= 0.052 && sharpJumpsRatio >= 0.11) ||
+    (paperGrayRatio >= 0.36 && sharpJumpsRatio >= 0.095) ||
+    (borderInkRatio >= 0.06 && inkNextToPaperRatio >= 0.03);
+
+  if (isDocumentOrTable) {
+    return {
+      isFood: false,
+      nonFoodReason:
+        'Hệ thống phát hiện ảnh tải lên là bảng số liệu, biểu đồ hoặc tài liệu văn bản (không phải thức ăn/đồ uống). Vui lòng chụp hoặc tải lên hình ảnh món ăn thực tế để AI tính Calo!',
+      analysisSource: 'vision-canvas',
+      foodDescription: '',
+      estimatedCalories: 0,
+      macros: { protein: 0, carbs: 0, fat: 0 },
+      items: [],
+      nutritionScore: 0,
+      advice: '',
+      healthTags: [],
+    };
+  }
+
+  // 1B. Detect digital screenshots / UI screens / synthetic graphics
+  if (flatPixelRatio >= 0.55 || coolNonFoodRatio >= 0.24) {
+    return {
+      isFood: false,
+      nonFoodReason:
+        'Hình ảnh có dấu hiệu là ảnh chụp màn hình hoặc đồ vật không phải thực phẩm. Vui lòng chụp trực tiếp đĩa/tô món ăn của bạn.',
+      analysisSource: 'vision-canvas',
+      foodDescription: '',
+      estimatedCalories: 0,
+      macros: { protein: 0, carbs: 0, fat: 0 },
+      items: [],
+      nutritionScore: 0,
+      advice: '',
+      healthTags: [],
+    };
+  }
+
+  // 1C. Detect monochrome, blank, or non-food scenes with insufficient organic food colors
+  const coloredFoodEvidence =
+    greenRatio +
+    brownProteinRatio +
+    orangeRedRatio +
+    goldenFriedRatio +
+    warmBrothRatio +
+    creamyLightRatio;
+
+  if (coloredFoodEvidence < 0.12 || saturation < 0.09 || centerFoodRatio < 0.14) {
+    return {
+      isFood: false,
+      nonFoodReason:
+        'Không nhận diện được món ăn hoặc thực phẩm rõ ràng trong ảnh này. Vui lòng chụp cận cảnh, đủ sáng vào đĩa/tô thức ăn của bạn.',
+      analysisSource: 'vision-canvas',
+      foodDescription: '',
+      estimatedCalories: 0,
+      macros: { protein: 0, carbs: 0, fat: 0 },
+      items: [],
+      nutritionScore: 0,
+      advice: '',
+      healthTags: [],
+    };
+  }
+
+  // ============================================================================
+  // STAGE 2: COMPONENT-LEVEL FOOD SEGMENTATION & PER-ITEM MACRO CALCULATION
+  // ============================================================================
+  const items: MealItem[] = [];
   const tags: string[] = [];
   const adviceNotes: string[] = [];
+  let score = 8.5;
 
-  // 1. Check if filename has a meaningful human food name (ignoring camera names like IMG_1234, image, photo)
-  const isGenericFile =
-    !cleanFileName ||
-    /^(img|dsc|image|photo|pic|screenshot|whatsapp|zalo|camera|bua an|meal|upload|\d+)/i.test(
-      cleanFileName.trim()
-    );
+  // Estimate total plate weight (~320g to 520g) based on visual coverage
+  const totalEstimatedGrams = Math.round(280 + Math.min(0.65, coloredFoodEvidence + whiteStarchRatio * 0.5) * 380);
 
-  if (!isGenericFile && cleanFileName.length >= 3) {
-    if (cleanFileName.includes('pho') || cleanFileName.includes('phở')) {
-      baseDescription = 'Tô phở thịt bò/gà kèm bánh phở và hành ngò nhận diện từ ảnh';
-      baseCalories = 475;
-      baseProtein = 32;
-      baseCarbs = 60;
-      baseFat = 12;
-      tags.push('Món nước', 'Giàu đạm');
-    } else if (cleanFileName.includes('bun') || cleanFileName.includes('bún')) {
-      baseDescription = 'Khẩu phần bún tươi kèm thịt nạc/chả và rau sống nhận diện từ ảnh';
-      baseCalories = 505;
-      baseProtein = 33;
-      baseCarbs = 62;
-      baseFat = 14;
-      tags.push('Bún tươi', 'Đủ nhóm chất');
-    } else if (cleanFileName.includes('com') || cleanFileName.includes('cơm')) {
-      baseDescription = 'Đĩa cơm kèm thức ăn giàu đạm và rau củ nhận diện từ ảnh';
-      baseCalories = 540;
-      baseProtein = 36;
-      baseCarbs = 64;
-      baseFat = 15;
-      tags.push('Bữa chính', 'Năng lượng cao');
-    } else if (cleanFileName.includes('salad') || cleanFileName.includes('rau')) {
-      baseDescription = 'Đĩa Salad rau xanh tổng hợp kèm đạm áp chảo và sốt nhẹ';
-      baseCalories = 360;
-      baseProtein = 28;
-      baseCarbs = 26;
-      baseFat = 15;
-      tags.push('Giàu chất xơ', 'Eat Clean');
-    }
-  }
+  // Normalize component weights so we can allocate realistic gram portions to each detected dish item
+  const rawProteinWeight = brownProteinRatio * 1.35 + orangeRedRatio * 1.15 + goldenFriedRatio * 0.75;
+  const rawStarchWeight = whiteStarchRatio * 1.25 + creamyLightRatio * 1.1 + goldenFriedRatio * 0.35;
+  const rawVeggieWeight = greenRatio * 1.45 + orangeRedRatio * 0.35;
+  const rawBrothOrSauceWeight = warmBrothRatio * 1.2 + goldenFriedRatio * 0.4;
 
-  // 2. Classify based on visual pixel composition if not already matched
-  if (!baseDescription) {
-    if (greenRatio >= 0.22 && brownProteinRatio >= 0.1) {
-      baseDescription =
-        'Khẩu phần giàu rau xanh (bông cải/xà lách/rau luộc) kết hợp thịt/ức gà áp chảo và tinh bột vừa phải';
-      baseCalories = 430;
-      baseProtein = 38;
-      baseCarbs = 38;
-      baseFat = 11;
-      score = 9.5;
-      tags.push('Nhiều rau xanh', 'Giàu Protein', 'Eat Clean');
-    } else if (greenRatio >= 0.26) {
-      baseDescription =
-        'Đĩa Salad rau củ quả tươi giàu chất xơ kết hợp nguồn đạm thanh đạm và hạt/trứng';
-      baseCalories = 350;
-      baseProtein = 24;
-      baseCarbs = 32;
-      baseFat = 13;
-      score = 9.2;
-      tags.push('Giàu chất xơ', 'Ít Calo', 'Thanh đạm');
-    } else if (warmBrothRatio >= 0.18 && whiteStarchRatio >= 0.14) {
-      baseDescription =
-        'Tô món nước (bún / phở / hủ tiếu) kèm thịt nạc, nước dùng và hành rau thơm';
-      baseCalories = 485;
-      baseProtein = 31;
-      baseCarbs = 60;
-      baseFat = 13;
-      score = 8.4;
-      tags.push('Món nước', 'Dễ tiêu hóa');
-    } else if (goldenFriedRatio >= 0.22 && whiteStarchRatio >= 0.15) {
-      baseDescription =
-        'Khẩu phần cơm kèm món chiên/áp chảo vàng giòn (trứng ốp/thịt/cá chiên) và đồ ăn kèm';
-      baseCalories = 590;
-      baseProtein = 33;
-      baseCarbs = 62;
-      baseFat = 22;
-      score = 7.5;
-      tags.push('Năng lượng cao', 'Cần lưu ý dầu mỡ');
-    } else if (orangeRedRatio >= 0.16 && greenRatio >= 0.1) {
-      baseDescription =
-        'Khẩu phần cá hồi / tôm / thịt bò chế biến kèm cà chua, rau xanh và tinh bột tốt';
-      baseCalories = 465;
-      baseProtein = 36;
-      baseCarbs = 42;
-      baseFat = 16;
-      score = 9.0;
-      tags.push('Giàu Omega & Đạm', 'Cân đối Macro');
-    } else if (creamyLightRatio >= 0.22 && mealType !== 'Bữa tối') {
-      baseDescription =
-        'Khẩu phần ngũ cốc / yến mạch / sữa chua kết hợp trái cây và hạt dinh dưỡng';
-      baseCalories = 365;
-      baseProtein = 21;
-      baseCarbs = 48;
-      baseFat = 10;
-      score = 9.0;
-      tags.push('Năng lượng sạch', 'Tốt cho tiêu hóa');
-    } else if (whiteStarchRatio >= 0.28 && brownProteinRatio >= 0.12) {
-      baseDescription =
-        'Phần cơm trắng / tinh bột kèm thịt nạc kho/nướng và món ăn mặn truyền thống';
-      baseCalories = 545;
-      baseProtein = 35;
-      baseCarbs = 66;
-      baseFat = 15;
-      score = 8.0;
-      tags.push('Bữa cơm chính', 'Giàu năng lượng');
-    } else if (brownProteinRatio >= 0.22) {
-      baseDescription =
-        'Khẩu phần giàu đạm (thịt bò / ức gà / thịt heo nạc áp chảo) kèm tinh bột và rau củ';
-      baseCalories = 495;
-      baseProtein = 42;
-      baseCarbs = 46;
-      baseFat = 14;
-      score = 8.8;
-      tags.push('Giàu Protein', 'Phục hồi cơ bắp');
-    } else {
-      // Meal-type contextual visual profile
-      if (mealType === 'Bữa sáng') {
-        baseDescription =
-          'Bữa sáng cung cấp năng lượng (trứng / bánh mì / bún phở sáng kèm đạm và rau)';
-        baseCalories = 435;
-        baseProtein = 26;
-        baseCarbs = 50;
-        baseFat = 14;
-        score = 8.5;
-        tags.push('Bữa sáng năng lượng', 'Đủ chất');
-      } else if (mealType === 'Bữa phụ') {
-        baseDescription =
-          'Bữa phụ bổ sung năng lượng & đạm nhẹ (trái cây / hạt / sữa chua / khoai / trứng)';
-        baseCalories = 315;
-        baseProtein = 20;
-        baseCarbs = 38;
-        baseFat = 9;
-        score = 8.8;
-        tags.push('Bữa phụ', 'Hỗ trợ tập luyện');
-      } else if (mealType === 'Bữa tối') {
-        baseDescription =
-          'Khẩu phần ăn tối gồm nhóm đạm nạc, rau củ và lượng tinh bột vừa phải';
-        baseCalories = 455;
-        baseProtein = 34;
-        baseCarbs = 46;
-        baseFat = 13;
-        score = 8.6;
-        tags.push('Bữa tối', 'Dinh dưỡng cân bằng');
-      } else {
-        baseDescription =
-          'Khẩu phần bữa chính gồm nhóm Đạm (thịt/cá/trứng), Tinh bột và Rau củ đi kèm';
-        baseCalories = 515;
-        baseProtein = 36;
-        baseCarbs = 56;
-        baseFat = 15;
-        score = 8.5;
-        tags.push('Đủ 3 nhóm chất', 'Cân đối');
-      }
-    }
-  }
-
-  // Scale calories and macros by visual portion density
-  const estimatedCalories = Math.max(
-    180,
-    Math.round((baseCalories * portionScale + fineCalorieOffset) / 5) * 5
+  const weightSum = Math.max(
+    0.01,
+    rawProteinWeight + rawStarchWeight + rawVeggieWeight + rawBrothOrSauceWeight
   );
-  const protein = Math.max(10, Math.round(baseProtein * portionScale));
-  const carbs = Math.max(12, Math.round(baseCarbs * portionScale));
-  const fat = Math.max(5, Math.round(baseFat * portionScale));
 
-  // Build specific, actionable meal improvement suggestions & notes based on visual evidence
-  if (greenRatio < 0.08) {
-    adviceNotes.push(
-      'Gợi ý cải thiện: Nhìn trong ảnh khẩu phần rau xanh đang khá ít. Bạn nên bổ sung thêm 1 đĩa rau luộc, dưa leo hoặc xà lách (khoảng 100-150g) để tăng chất xơ, giúp no lâu và kiểm soát đường huyết tốt hơn.'
+  // 1. Protein Component(s)
+  if (rawProteinWeight / weightSum >= 0.12) {
+    const proteinGrams = Math.max(
+      60,
+      Math.min(220, Math.round((rawProteinWeight / weightSum) * totalEstimatedGrams / 5) * 5)
     );
-    score = Math.max(6.5, Number((score - 0.6).toFixed(1)));
-  } else if (greenRatio >= 0.2) {
-    adviceNotes.push(
-      'Điểm cộng: Tỷ lệ rau xanh và chất xơ trong đĩa ăn rất tốt, hỗ trợ tiêu hóa và giảm hấp thu mỡ thừa hiệu quả.'
-    );
+
+    if (orangeRedRatio > brownProteinRatio && orangeRedRatio >= 0.08) {
+      // Salmon / Shrimp / Beef / Tomato-braised protein
+      const prot = Math.round(proteinGrams * 0.22);
+      const fat = Math.round(proteinGrams * 0.1);
+      const carbs = Math.round(proteinGrams * 0.02);
+      const cal = prot * 4 + carbs * 4 + fat * 9;
+      items.push({
+        name: 'Cá hồi / Tôm / Thịt bò chế biến',
+        portion: `~${proteinGrams}g`,
+        calories: cal,
+        protein: prot,
+        carbs,
+        fat,
+      });
+      tags.push('Giàu Đạm & Omega');
+    } else if (goldenFriedRatio > brownProteinRatio && goldenFriedRatio >= 0.1) {
+      // Pan-fried / Egg / Crispy protein
+      const prot = Math.round(proteinGrams * 0.18);
+      const fat = Math.round(proteinGrams * 0.14);
+      const carbs = Math.round(proteinGrams * 0.05);
+      const cal = prot * 4 + carbs * 4 + fat * 9;
+      items.push({
+        name: 'Đạm chiên / Trứng ốp / Thịt áp chảo vàng',
+        portion: `~${proteinGrams}g`,
+        calories: cal,
+        protein: prot,
+        carbs,
+        fat,
+      });
+      tags.push('Món áp chảo/chiên');
+    } else {
+      // Grilled / Lean meat / Chicken breast / Pork / Beef
+      const prot = Math.round(proteinGrams * 0.25);
+      const fat = Math.round(proteinGrams * 0.07);
+      const carbs = Math.round(proteinGrams * 0.02);
+      const cal = prot * 4 + carbs * 4 + fat * 9;
+      items.push({
+        name: 'Thịt nạc / Ức gà / Bò chế biến',
+        portion: `~${proteinGrams}g`,
+        calories: cal,
+        protein: prot,
+        carbs,
+        fat,
+      });
+      tags.push('Giàu Protein');
+    }
   }
 
-  if (goldenFriedRatio >= 0.2) {
-    adviceNotes.push(
-      'Lưu ý chế biến: Món ăn có dấu hiệu dùng khá nhiều dầu mỡ hoặc nước sốt béo. Để tối ưu mục tiêu "' +
-        goal +
-        '", bạn nên hạn chế rưới nước sốt/mỡ hành và ưu tiên món hấp, luộc hoặc áp chảo ít dầu.'
+  // 2. Starch / Carbohydrate Component
+  if (rawStarchWeight / weightSum >= 0.14) {
+    const starchGrams = Math.max(
+      70,
+      Math.min(240, Math.round((rawStarchWeight / weightSum) * totalEstimatedGrams / 5) * 5)
     );
-    score = Math.max(6.5, Number((score - 0.5).toFixed(1)));
+
+    if (warmBrothRatio >= 0.14) {
+      // Noodles / Pho / Bun
+      const carbs = Math.round(starchGrams * 0.25);
+      const prot = Math.round(starchGrams * 0.03);
+      const fat = Math.round(starchGrams * 0.01);
+      const cal = prot * 4 + carbs * 4 + fat * 9;
+      items.push({
+        name: 'Sợi bún / Bánh phở / Mì',
+        portion: `~${starchGrams}g (1 vắt vừa)`,
+        calories: cal,
+        protein: prot,
+        carbs,
+        fat,
+      });
+      tags.push('Món nước');
+    } else if (creamyLightRatio > whiteStarchRatio) {
+      // Oats / Whole grain / Sweet potato / Bread
+      const carbs = Math.round(starchGrams * 0.27);
+      const prot = Math.round(starchGrams * 0.05);
+      const fat = Math.round(starchGrams * 0.03);
+      const cal = prot * 4 + carbs * 4 + fat * 9;
+      items.push({
+        name: 'Tinh bột phức (Ngũ cốc / Khoai / Bánh mì)',
+        portion: `~${starchGrams}g`,
+        calories: cal,
+        protein: prot,
+        carbs,
+        fat,
+      });
+      tags.push('Tinh bột hấp thu chậm');
+    } else {
+      // Steamed rice / Sticky rice
+      const carbs = Math.round(starchGrams * 0.28);
+      const prot = Math.round(starchGrams * 0.026);
+      const fat = Math.round(starchGrams * 0.005);
+      const cal = prot * 4 + carbs * 4 + fat * 9;
+      items.push({
+        name: 'Cơm / Tinh bột chính',
+        portion: `~${starchGrams}g (~1 chén)`,
+        calories: cal,
+        protein: prot,
+        carbs,
+        fat,
+      });
+    }
   }
 
-  if (whiteStarchRatio >= 0.26) {
-    adviceNotes.push(
-      'Lưu ý cách ăn: Lượng tinh bột (cơm/bún/phở) trong khẩu phần khá đầy đặn. Hãy áp dụng quy tắc ăn rau xanh và thịt/đạm trước, ăn tinh bột sau cùng (hoặc bớt lại 1/4 lượng tinh bột nếu ăn vào buổi tối).'
+  // 3. Vegetable / Fiber Component
+  if (greenRatio >= 0.05 || rawVeggieWeight / weightSum >= 0.1) {
+    const veggieGrams = Math.max(
+      50,
+      Math.min(200, Math.round(((greenRatio + orangeRedRatio * 0.25) / weightSum) * totalEstimatedGrams / 5) * 5)
     );
-  }
-
-  if (warmBrothRatio >= 0.18) {
-    adviceNotes.push(
-      'Lưu ý món nước: Với các món bún/phở/canh, nên hớt bớt lớp váng béo trên mặt và không nên húp hết toàn bộ nước dùng để tránh nạp dư muối (natri) gây tích nước dưới da.'
-    );
-  }
-
-  if (adviceNotes.length === 0) {
-    adviceNotes.push(
-      `Gợi ý & Lưu ý: Khẩu phần có tổng năng lượng khoảng ${estimatedCalories} Kcal, phù hợp với mục tiêu "${goal}". Hãy ăn chậm nhai kỹ, ăn phần đạm và rau trước tinh bột, đồng thời uống thêm 250-300ml nước lọc cách bữa ăn 30 phút.`
-    );
-  } else {
-    adviceNotes.push(
-      `Mục tiêu "${goal}": Với mức năng lượng ~${estimatedCalories} Kcal ở ${mealType.toLowerCase()}, hãy duy trì uống đủ nước và vận động nhẹ sau ăn 20 phút.`
-    );
-  }
-
-  return {
-    foodDescription: baseDescription,
-    estimatedCalories,
-    macros: {
-      protein,
+    const carbs = Math.round(veggieGrams * 0.05);
+    const prot = Math.round(veggieGrams * 0.02);
+    const fat = Math.round(veggieGrams * 0.01);
+    const cal = prot * 4 + carbs * 4 + fat * 9;
+    items.push({
+      name: 'Rau xanh & Củ quả tươi',
+      portion: `~${veggieGrams}g`,
+      calories: cal,
+      protein: prot,
       carbs,
       fat,
+    });
+    if (greenRatio >= 0.18) {
+      tags.push('Giàu chất xơ');
+    }
+  }
+
+  // 4. Broth / Sauce / Cooking Oil Component
+  if (warmBrothRatio >= 0.14) {
+    const brothMl = Math.round(180 + warmBrothRatio * 250);
+    const prot = 4;
+    const carbs = 5;
+    const fat = Math.round(5 + goldenFriedRatio * 12);
+    const cal = prot * 4 + carbs * 4 + fat * 9;
+    items.push({
+      name: 'Nước dùng / Nước súp hầm',
+      portion: `~${brothMl}ml`,
+      calories: cal,
+      protein: prot,
+      carbs,
+      fat,
+    });
+  } else if (goldenFriedRatio >= 0.12 || brownProteinRatio >= 0.14) {
+    const fatGrams = Math.max(4, Math.round(4 + goldenFriedRatio * 22));
+    const carbsGrams = 3;
+    const cal = carbsGrams * 4 + fatGrams * 9;
+    items.push({
+      name: 'Dầu chế biến & Nước sốt gia vị',
+      portion: `~${fatGrams + 6}g`,
+      calories: cal,
+      protein: 0,
+      carbs: carbsGrams,
+      fat: fatGrams,
+    });
+  }
+
+  // Ensure at least 1 item if valid food photo
+  if (items.length === 0) {
+    items.push({
+      name: 'Khẩu phần món ăn hỗn hợp trong ảnh',
+      portion: `~${totalEstimatedGrams}g`,
+      calories: 380,
+      protein: 24,
+      carbs: 42,
+      fat: 12,
+    });
+  }
+
+  // Calculate exact totals from individual items
+  const totalCalories = items.reduce((sum, item) => sum + item.calories, 0);
+  const totalProtein = items.reduce((sum, item) => sum + item.protein, 0);
+  const totalCarbs = items.reduce((sum, item) => sum + item.carbs, 0);
+  const totalFat = items.reduce((sum, item) => sum + item.fat, 0);
+
+  const summaryNames = items
+    .filter((i) => !i.name.includes('Dầu chế biến'))
+    .map((i) => `${i.name} (${i.portion}: ${i.calories} Kcal)`)
+    .join(' + ');
+
+  // Build specific nutritional advice
+  if (greenRatio < 0.07) {
+    adviceNotes.push(
+      'Khẩu phần rau xanh trong ảnh đang khá ít. Bạn nên bổ sung thêm 100-150g rau luộc hoặc salad để tăng chất xơ và kiểm soát đường huyết.'
+    );
+    score = Math.max(6.8, Number((score - 0.6).toFixed(1)));
+  } else if (greenRatio >= 0.18) {
+    adviceNotes.push(
+      'Lượng rau xanh trong khẩu phần rất tốt, cung cấp nhiều chất xơ hỗ trợ tiêu hóa và giảm tích mỡ.'
+    );
+    score = Math.min(9.6, Number((score + 0.5).toFixed(1)));
+  }
+
+  if (totalFat >= 20 || goldenFriedRatio >= 0.18) {
+    adviceNotes.push(
+      `Lượng chất béo ước tính khoảng ${totalFat}g. Để tối ưu mục tiêu "${goal}", hãy hạn chế nước sốt béo/đồ chiên và ưu tiên chế biến hấp/luộc.`
+    );
+    score = Math.max(6.8, Number((score - 0.5).toFixed(1)));
+  }
+
+  adviceNotes.push(
+    `Tổng năng lượng: ${totalCalories} Kcal (Protein: ${totalProtein}g, Tinh bột: ${totalCarbs}g, Chất béo: ${totalFat}g). Nên ăn phần rau và đạm trước khi ăn tinh bột.`
+  );
+
+  return {
+    isFood: true,
+    analysisSource: 'vision-canvas',
+    foodDescription: summaryNames || `Bữa ăn (${mealType}) gồm ${items.length} thành phần`,
+    estimatedCalories: totalCalories,
+    macros: {
+      protein: totalProtein,
+      carbs: totalCarbs,
+      fat: totalFat,
     },
+    items,
     nutritionScore: score,
     advice: adviceNotes.join(' '),
-    healthTags: tags.slice(0, 3),
+    healthTags: tags.length > 0 ? tags.slice(0, 3) : ['Phân tích thị giác'],
   };
 }

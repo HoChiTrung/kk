@@ -20,7 +20,6 @@ import {
   SEED_BADGES,
   SEED_NOTIFICATIONS,
 } from './src/data/seedData.ts';
-import { analyzeFoodImageVisuals } from './src/utils/mealVisionAnalyzer.ts';
 
 dotenv.config();
 
@@ -217,6 +216,7 @@ async function initDatabase() {
       ALTER TABLE meal_logs ADD COLUMN IF NOT EXISTS drive_file_url TEXT;
       ALTER TABLE meal_logs ADD COLUMN IF NOT EXISTS ai_analyzed BOOLEAN DEFAULT TRUE;
       ALTER TABLE meal_logs ADD COLUMN IF NOT EXISTS nutrition_advice TEXT;
+      ALTER TABLE meal_logs ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]'::jsonb;
     `);
 
     // Purge any heavy Base64 image data from meal_logs so DB storage stays lightweight (only store Drive/URL links)
@@ -868,174 +868,6 @@ app.put('/api/advices/:id', async (req, res) => {
 const GOOGLE_DRIVE_PARENT_FOLDER_URL = 'https://drive.google.com/drive/folders/1DJCFlItKnPr4-YGShTwmJEgiFQ8Yayqc?usp=sharing';
 const GOOGLE_DRIVE_FOLDER_ID = '1DJCFlItKnPr4-YGShTwmJEgiFQ8Yayqc';
 
-// Popular Vietnamese & Fitness Meal Database for instant, accurate matching
-const POPULAR_DISHES: Array<{
-  keywords: string[];
-  dish: {
-    foodDescription: string;
-    estimatedCalories: number;
-    macros: { protein: number; carbs: number; fat: number };
-    nutritionScore: number;
-    advice: string;
-    healthTags: string[];
-  };
-}> = [
-  {
-    keywords: ['pho', 'phở', 'bò', 'tái', 'nạm', 'bánh phở'],
-    dish: {
-      foodDescription: '1 tô Phở bò tái nạm hành hoa tươi, bánh phở mềm',
-      estimatedCalories: 480,
-      macros: { protein: 32, carbs: 62, fat: 12 },
-      nutritionScore: 9,
-      advice: 'Món ăn giàu đạm sắt từ thịt bò tươi, nước dùng thanh đạm. Nên ăn kèm nhiều rau thơm giá đỗ.',
-      healthTags: ['Đạm bò tươi', 'Ít dầu mỡ', 'Năng lượng tốt'],
-    },
-  },
-  {
-    keywords: ['com tam', 'cơm tấm', 'sườn', 'tấm', 'bì chả'],
-    dish: {
-      foodDescription: '1 đĩa Cơm tấm sườn nạc nướng mật ong kèm trứng ốp la và dưa leo cà chua',
-      estimatedCalories: 560,
-      macros: { protein: 38, carbs: 68, fat: 16 },
-      nutritionScore: 8.5,
-      advice: 'Lượng đạm tốt từ sườn nạc và trứng. Giảm bớt mỡ hành nếu đang trong giai đoạn siết cơ.',
-      healthTags: ['Giàu đạm', 'Cơm tấm', 'No lâu'],
-    },
-  },
-  {
-    keywords: ['bun cha', 'bún chả', 'chả nướng', 'bun'],
-    dish: {
-      foodDescription: '1 phần Bún chả nướng than hoa nạc, đĩa bún tươi và rau sống kinh giới',
-      estimatedCalories: 510,
-      macros: { protein: 34, carbs: 64, fat: 14 },
-      nutritionScore: 9,
-      advice: 'Chả thịt nạc hấp thu tốt, nhiều rau xanh bổ sung chất xơ tự nhiên hỗ trợ tiêu hóa.',
-      healthTags: ['Đạm thịt nạc', 'Nhiều rau xanh'],
-    },
-  },
-  {
-    keywords: ['uc ga', 'ức gà', 'gạo lứt', 'lut', 'bông cải', 'sup lo'],
-    dish: {
-      foodDescription: '150g Ức gà áp chảo sốt tiêu đen, 1 chén cơm gạo lứt, súp lơ xanh luộc',
-      estimatedCalories: 450,
-      macros: { protein: 42, carbs: 45, fat: 9 },
-      nutritionScore: 10,
-      advice: 'Chuẩn tỉ lệ macro thể hình vàng. Đạm nạc nguyên chất tối đa hóa khả năng đồng hóa cơ.',
-      healthTags: ['Chuẩn siết mỡ', 'High Protein', 'Gạo lứt'],
-    },
-  },
-  {
-    keywords: ['ca hoi', 'cá hồi', 'salad', 'bơ', 'dau tay'],
-    dish: {
-      foodDescription: 'Filet cá hồi áp chảo sốt chanh leo, xà lách romaine, bơ sáp và cà chua bi',
-      estimatedCalories: 430,
-      macros: { protein: 35, carbs: 22, fat: 20 },
-      nutritionScore: 9.5,
-      advice: 'Giàu Omega-3 và chất béo lành mạnh giúp kháng viêm khớp sau buổi tập nặng.',
-      healthTags: ['Omega-3', 'Chất béo tốt', 'Keto/Lowcarb'],
-    },
-  },
-  {
-    keywords: ['thit bo', 'thịt bò', 'xào', 'bò xào', 'bông cải'],
-    dish: {
-      foodDescription: '150g Thịt bò xào bông cải xanh tỏi tây, 1 chén cơm trắng/gạo lứt',
-      estimatedCalories: 470,
-      macros: { protein: 39, carbs: 48, fat: 13 },
-      nutritionScore: 9,
-      advice: 'Bổ sung creatine tự nhiên và sắt từ thịt bò, bông cải giàu sulforaphane chống oxy hóa.',
-      healthTags: ['Tăng cơ', 'Creatine tự nhiên', 'Giàu vi chất'],
-    },
-  },
-  {
-    keywords: ['banh mi', 'bánh mì', 'trung', 'trứng ốp', 'op la'],
-    dish: {
-      foodDescription: '2 quả trứng ốp la lòng đào, 1 ổ bánh mì đen nguyên cám kèm quả bơ lát',
-      estimatedCalories: 390,
-      macros: { protein: 22, carbs: 38, fat: 16 },
-      nutritionScore: 9,
-      advice: 'Bữa sáng nhanh gọn, choline trong lòng đỏ trứng hỗ trợ dẫn truyền xung thần kinh vận động.',
-      healthTags: ['Bữa sáng nhanh', 'Choline não bộ', 'Năng lượng sạch'],
-    },
-  },
-  {
-    keywords: ['yen mach', 'yến mạch', 'sua chua', 'sữa chua', 'chuoi'],
-    dish: {
-      foodDescription: 'Yến mạch ngâm sữa chua Hy Lạp, chuối tây thái lát và hạt chia hạnh nhân',
-      estimatedCalories: 340,
-      macros: { protein: 18, carbs: 52, fat: 7 },
-      nutritionScore: 9,
-      advice: 'Bữa phụ hoàn hảo trước hoặc sau tập 1-2 tiếng, nạp glycogen cơ bắp nhanh chóng.',
-      healthTags: ['Bữa phụ', 'Glycogen phục hồi', 'Tiêu hóa nhẹ'],
-    },
-  },
-  {
-    keywords: ['thit kho', 'thịt kho', 'canh', 'cơm nhà', 'canh chua'],
-    dish: {
-      foodDescription: 'Thịt nạc kho tiêu ít đường, 1 chén cơm trắng và 1 bát canh rau ngót nấu tôm',
-      estimatedCalories: 490,
-      macros: { protein: 36, carbs: 56, fat: 12 },
-      nutritionScore: 8.5,
-      advice: 'Bữa cơm gia đình lành mạnh, giàu đạm và vitamin K từ rau ngót thanh nhiệt.',
-      healthTags: ['Cơm nhà sạch', 'Giàu canxi', 'Thanh mát'],
-    },
-  },
-  {
-    keywords: ['bun bo', 'bún bò', 'bún bò huế', 'giò heo'],
-    dish: {
-      foodDescription: '1 tô Bún bò Huế bắp bò nạc, chả cua và rau sống bắp chuối',
-      estimatedCalories: 540,
-      macros: { protein: 36, carbs: 64, fat: 15 },
-      nutritionScore: 8.5,
-      advice: 'Giàu đạm từ bắp bò, nên hớt bớt váng dầu sa tế nếu đang giảm mỡ.',
-      healthTags: ['Đạm bắp bò', 'Năng lượng cao'],
-    },
-  },
-  {
-    keywords: ['hu tieu', 'hủ tiếu', 'mì', 'mi quang', 'mì quảng'],
-    dish: {
-      foodDescription: '1 tô Hủ tiếu / Mì thịt nạc tôm tươi kèm giá hẹ và xà lách',
-      estimatedCalories: 440,
-      macros: { protein: 28, carbs: 58, fat: 10 },
-      nutritionScore: 9,
-      advice: 'Nước dùng thanh ngọt, tôm và thịt nạc cung cấp đạm dễ tiêu hóa.',
-      healthTags: ['Thanh đạm', 'Dễ tiêu hóa'],
-    },
-  },
-  {
-    keywords: ['com ga', 'cơm gà', 'gà luộc', 'ga nuong', 'gà nướng'],
-    dish: {
-      foodDescription: '1 đĩa Cơm gà luộc/nướng bỏ da kèm dưa leo, cà chua và canh cải',
-      estimatedCalories: 510,
-      macros: { protein: 39, carbs: 62, fat: 11 },
-      nutritionScore: 9,
-      advice: 'Thịt gà bỏ da là nguồn đạm nạc tuyệt vời cho cơ bắp.',
-      healthTags: ['Giàu Protein', 'Ít béo'],
-    },
-  },
-  {
-    keywords: ['khoai lang', 'khoai', 'bắp', 'ngô', 'trứng luộc'],
-    dish: {
-      foodDescription: '2 củ Khoai lang mật hấp kèm 2 quả trứng gà luộc và 1 đĩa rau luộc',
-      estimatedCalories: 360,
-      macros: { protein: 18, carbs: 54, fat: 8 },
-      nutritionScore: 9.5,
-      advice: 'Tinh bột hấp thu chậm (GI thấp) từ khoai lang giúp no lâu và siết mỡ hiệu quả.',
-      healthTags: ['Carb chậm', 'Siết mỡ', 'Eat Clean'],
-    },
-  },
-  {
-    keywords: ['sinh to', 'sinh tố', 'whey', 'protein', 'chuối'],
-    dish: {
-      foodDescription: '1 ly Sinh tố Whey Protein xay cùng chuối sứ, bơ đậu phộng và sữa tươi không đường',
-      estimatedCalories: 350,
-      macros: { protein: 34, carbs: 36, fat: 8 },
-      nutritionScore: 10,
-      advice: 'Bữa phụ sau tập (Post-workout) hoàn hảo giúp phục hồi sợi cơ tức thì.',
-      healthTags: ['Phục hồi cơ', 'High Protein'],
-    },
-  },
-];
-
 // AI Meal Photo Recognition Endpoint (SRS Nutrition Log auto-analysis)
 app.post('/api/ai/analyze-meal', async (req, res) => {
   try {
@@ -1045,8 +877,6 @@ app.post('/api/ai/analyze-meal', async (req, res) => {
       studentGoal = 'Cân đối vóc dáng',
       mealType = 'Bữa trưa',
       studentName = 'Học viên',
-      dishHint = '',
-      fileName = '',
     } = req.body;
 
     if (!imageBase64) {
@@ -1054,9 +884,14 @@ app.post('/api/ai/analyze-meal', async (req, res) => {
     }
 
     const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '').trim();
-    const effectiveMime = mimeType.includes('png') ? 'image/png' : mimeType.includes('webp') ? 'image/webp' : 'image/jpeg';
+    const effectiveMime = mimeType.includes('png')
+      ? 'image/png'
+      : mimeType.includes('webp')
+      ? 'image/webp'
+      : 'image/jpeg';
 
     let aiResult: any = null;
+    let geminiErrorHint = '';
 
     // Check if Gemini API Key is available in runtime env
     const apiKey = process.env.GEMINI_API_KEY;
@@ -1071,15 +906,23 @@ app.post('/api/ai/analyze-meal', async (req, res) => {
       });
 
       const prompt = `Bạn là chuyên gia dinh dưỡng thể thao & AI thị giác máy tính tại FitTrack Pro.
-Nhiệm vụ: Quan sát kỹ bức ảnh chụp thức ăn này của học viên và phân tích bữa ăn trực tiếp từ hình ảnh.
+Nhiệm vụ: Quan sát kỹ bức ảnh học viên gửi lên và phân tích trực tiếp từ hình ảnh.
 Thông tin học viên: Tên ${studentName}, Mục tiêu sức khỏe: "${studentGoal}", Thời điểm: ${mealType}.
 
-Hãy phân tích chính xác từ bức ảnh thức ăn:
-1. Nhận diện tên món ăn và liệt kê các thành phần thực phẩm có trong ảnh (foodDescription).
-2. Tính tổng lượng Calo (estimatedCalories - Kcal) sát thực tế khẩu phần trong ảnh.
-3. Ước tính các chất đa lượng: Đạm (protein g), Tinh bột (carbs g), Chất béo (fat g).
-4. Chấm điểm dinh dưỡng của bữa ăn từ 1 đến 10 (nutritionScore).
-5. Đưa ra gợi ý cải thiện bữa ăn hoặc lưu ý cụ thể (advice) cho học viên dựa trên món ăn trong ảnh và mục tiêu "${studentGoal}" (ví dụ: cần thêm rau xanh, giảm dầu mỡ/nước chấm, thứ tự ăn rau/đạm trước tinh bột, hoặc lưu ý thời điểm ăn).`;
+QUY TẮC BẮT BUỘC:
+1. Kiểm tra xem bức ảnh có thực sự là thức ăn, món ăn hoặc đồ uống hay không (isFood: true/false).
+   - Nếu bức ảnh là bảng số liệu, biểu đồ, giấy tờ văn bản, ảnh chụp màn hình, đồ vật, con người hoặc phong cảnh KHÔNG có thức ăn: BẮT BUỘC trả về isFood = false, nonFoodReason = mô tả rõ bức ảnh là gì (ví dụ: "Hình ảnh bạn tải lên là bảng số liệu / tài liệu chữ, không phải thức ăn hay đồ uống."), estimatedCalories = 0, items = [].
+2. Nếu bức ảnh LÀ món ăn/đồ uống thực tế (isFood = true):
+   - Liệt kê chi tiết TỪNG MÓN / THÀNH PHẦN thực phẩm nhìn thấy trong ảnh vào mảng "items":
+     + name: Tên món hoặc thành phần thực phẩm (ví dụ: "Thịt bò tái", "Bánh phở", "Trứng gà ốp la", "Cơm trắng", "Rau cải luộc").
+     + portion: Khẩu phần ước tính từ hình ảnh (ví dụ: "120g", "1 tô vừa", "1 quả", "100g").
+     + calories: Lượng Calo (Kcal) của riêng món đó.
+     + protein: Lượng Đạm/Protein (gram) của riêng món đó.
+     + carbs: Lượng Tinh bột/Carbs (gram) của riêng món đó.
+     + fat: Lượng Chất béo/Fat (gram) của riêng món đó.
+   - Tính tổng lượng Calo của cả bữa ăn (estimatedCalories = tổng calories của các items).
+   - Tính tổng macros của cả bữa ăn: protein (g), carbs (g), fat (g).
+   - Tóm tắt tên bữa ăn (foodDescription) và đưa ra gợi ý cải thiện bữa ăn (advice) sát với mục tiêu "${studentGoal}".`;
 
       const candidateModels = [
         'gemini-3.8-flash',
@@ -1109,13 +952,21 @@ Hãy phân tích chính xác từ bức ảnh thức ăn:
               responseSchema: {
                 type: Type.OBJECT,
                 properties: {
+                  isFood: {
+                    type: Type.BOOLEAN,
+                    description: 'True nếu ảnh là thức ăn/đồ uống thực tế. False nếu ảnh là bảng số liệu, tài liệu chữ, ảnh chụp màn hình hoặc không phải đồ ăn.',
+                  },
+                  nonFoodReason: {
+                    type: Type.STRING,
+                    description: 'Lý do từ chối nếu isFood = false (mô tả ảnh thực tế là gì).',
+                  },
                   foodDescription: {
                     type: Type.STRING,
-                    description: 'Tên món ăn và các thành phần nhận diện được từ bức ảnh.',
+                    description: 'Tên bữa ăn và các thành phần nhận diện được từ bức ảnh.',
                   },
                   estimatedCalories: {
                     type: Type.INTEGER,
-                    description: 'Tổng lượng Calo (Kcal) ước tính của bữa ăn trong ảnh.',
+                    description: 'Tổng lượng Calo (Kcal) của toàn bộ bữa ăn.',
                   },
                   macros: {
                     type: Type.OBJECT,
@@ -1125,6 +976,22 @@ Hãy phân tích chính xác từ bức ảnh thức ăn:
                       fat: { type: Type.INTEGER },
                     },
                     required: ['protein', 'carbs', 'fat'],
+                  },
+                  items: {
+                    type: Type.ARRAY,
+                    description: 'Danh sách chi tiết từng món/thành phần trong bữa ăn kèm Calo, Protein, Carbs, Fat của từng món.',
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        name: { type: Type.STRING },
+                        portion: { type: Type.STRING },
+                        calories: { type: Type.INTEGER },
+                        protein: { type: Type.NUMBER },
+                        carbs: { type: Type.NUMBER },
+                        fat: { type: Type.NUMBER },
+                      },
+                      required: ['name', 'portion', 'calories', 'protein', 'carbs', 'fat'],
+                    },
                   },
                   nutritionScore: {
                     type: Type.NUMBER,
@@ -1139,7 +1006,15 @@ Hãy phân tích chính xác từ bức ảnh thức ăn:
                     items: { type: Type.STRING },
                   },
                 },
-                required: ['foodDescription', 'estimatedCalories', 'macros', 'nutritionScore', 'advice'],
+                required: [
+                  'isFood',
+                  'foodDescription',
+                  'estimatedCalories',
+                  'macros',
+                  'items',
+                  'nutritionScore',
+                  'advice',
+                ],
               },
             },
           });
@@ -1154,38 +1029,42 @@ Hãy phân tích chính xác từ bức ảnh thức ăn:
           const match = rawText.match(/\{[\s\S]*\}/);
           if (match) {
             const parsed = JSON.parse(match[0]);
-            if (parsed && parsed.foodDescription && parsed.estimatedCalories) {
-              aiResult = { ...parsed, geminiModelUsed: modelName };
+            if (parsed && typeof parsed.isFood === 'boolean') {
+              aiResult = {
+                ...parsed,
+                analysisSource: 'gemini-ai',
+                geminiModelUsed: modelName,
+              };
               break;
             }
           }
         } catch (modelErr: unknown) {
-          console.warn(`⚠️ Model ${modelName} error (${getErrMessage(modelErr)}), trying next model...`);
+          const msg = getErrMessage(modelErr);
+          console.warn(`⚠️ Model ${modelName} error (${msg}), trying next model...`);
+          if (msg.includes('401') || msg.includes('403') || msg.includes('API key not valid')) {
+            geminiErrorHint =
+              'GEMINI_API_KEY hiện tại không hợp lệ hoặc đã hết hạn. Vui lòng kiểm tra trong Settings > Secrets.';
+            break;
+          }
         }
       }
     }
 
-    if (!aiResult) {
-      aiResult = await analyzeFoodImageVisuals(imageBase64, {
-        mealType,
-        studentGoal,
-        fileName,
-      });
-    }
-
-    // Google Drive Folder URL per student
     const studentFolder = `FitTrack_${studentName.replace(/\s+/g, '_')}`;
     const driveFolderUrl = GOOGLE_DRIVE_PARENT_FOLDER_URL;
     const driveFileUrl = `${GOOGLE_DRIVE_PARENT_FOLDER_URL}#file-${Date.now()}`;
 
     res.status(200).json({
-      success: true,
-      analysis: {
-        ...aiResult,
-        studentFolder,
-        driveFolderUrl,
-        driveFileUrl,
-      },
+      success: Boolean(aiResult),
+      geminiErrorHint: geminiErrorHint || undefined,
+      analysis: aiResult
+        ? {
+            ...aiResult,
+            studentFolder,
+            driveFolderUrl,
+            driveFileUrl,
+          }
+        : null,
     });
   } catch (err: unknown) {
     console.error('Error analyzing meal:', err);
@@ -1217,6 +1096,7 @@ app.get('/api/meals', async (req, res) => {
       foodDescription: r.food_description,
       estimatedCalories: r.estimated_calories,
       macros: r.macros || { protein: 0, carbs: 0, fat: 0 },
+      items: Array.isArray(r.items) ? r.items : [],
       trainerReaction: r.trainer_reaction,
       trainerComment: r.trainer_comment,
       loggedAt: r.logged_at,
@@ -1240,6 +1120,7 @@ app.post('/api/meals', async (req, res) => {
     const driveFileUrl = m.driveFileUrl || driveFolderUrl;
     const aiAnalyzed = m.aiAnalyzed !== undefined ? m.aiAnalyzed : true;
     const nutritionAdvice = m.nutritionAdvice || '';
+    const mealItems = Array.isArray(m.items) ? m.items : [];
 
     // NEVER store heavy Base64 image data in PostgreSQL database! Only store lightweight Drive/HTTP link
     const rawImg = typeof m.imageUrl === 'string' ? m.imageUrl : '';
@@ -1249,8 +1130,8 @@ app.post('/api/meals', async (req, res) => {
 
     if (dbConnected) {
       await pool.query(
-        `INSERT INTO meal_logs (id, student_id, date, meal_type, image_url, food_description, estimated_calories, macros, trainer_reaction, trainer_comment, logged_at, drive_folder_url, drive_file_url, ai_analyzed, nutrition_advice)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+        `INSERT INTO meal_logs (id, student_id, date, meal_type, image_url, food_description, estimated_calories, macros, items, trainer_reaction, trainer_comment, logged_at, drive_folder_url, drive_file_url, ai_analyzed, nutrition_advice)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
         [
           mealId,
           m.studentId,
@@ -1260,6 +1141,7 @@ app.post('/api/meals', async (req, res) => {
           m.foodDescription,
           m.estimatedCalories || 450,
           JSON.stringify(m.macros || { protein: 35, carbs: 45, fat: 12 }),
+          JSON.stringify(mealItems),
           m.trainerReaction || null,
           m.trainerComment || null,
           loggedAt,
@@ -1274,6 +1156,7 @@ app.post('/api/meals', async (req, res) => {
       ...m,
       id: mealId,
       imageUrl: lightweightImageUrl,
+      items: mealItems,
       loggedAt,
       driveFolderUrl,
       driveFileUrl,

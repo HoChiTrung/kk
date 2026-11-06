@@ -106,6 +106,15 @@ export interface HealthScoreBreakdown {
   };
 }
 
+export interface MealItem {
+  name: string;
+  portion: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+}
+
 export interface MealLog {
   id: string;
   studentId: string;
@@ -119,6 +128,7 @@ export interface MealLog {
     carbs: number; // grams
     fat: number; // grams
   };
+  items?: MealItem[];
   trainerReaction?: '🔥' | '💪' | '👏' | '❤️';
   trainerComment?: string;
   loggedAt: string;

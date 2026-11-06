@@ -5,7 +5,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import confetti from 'canvas-confetti';
-import { StudentProfile, MealLog, WorkoutLog } from '../../types/health';
+import { StudentProfile, MealLog, MealItem, WorkoutLog } from '../../types/health';
 import { useHealth } from '../../context/HealthContext';
 import {
   calculateHealthScore,
@@ -129,12 +129,28 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
   const [protein, setProtein] = useState('');
   const [carbs, setCarbs] = useState('');
   const [fat, setFat] = useState('');
+  const [mealItems, setMealItems] = useState<MealItem[]>([]);
+  const [isFoodDetected, setIsFoodDetected] = useState<boolean | null>(null);
   const [nutritionAdvice, setNutritionAdvice] = useState('');
   const [nutritionScore, setNutritionScore] = useState<number | null>(null);
   const [healthTags, setHealthTags] = useState<string[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeSuccess, setAnalyzeSuccess] = useState(false);
   const [analyzeError, setAnalyzeError] = useState('');
+
+  const recalculateTotalsFromItems = (updatedItems: MealItem[]) => {
+    setMealItems(updatedItems);
+    if (updatedItems.length > 0) {
+      const totalCal = updatedItems.reduce((s, i) => s + (Number(i.calories) || 0), 0);
+      const totalProt = updatedItems.reduce((s, i) => s + (Number(i.protein) || 0), 0);
+      const totalCarb = updatedItems.reduce((s, i) => s + (Number(i.carbs) || 0), 0);
+      const totalFatVal = updatedItems.reduce((s, i) => s + (Number(i.fat) || 0), 0);
+      setCalories(String(Math.round(totalCal)));
+      setProtein(String(Math.round(totalProt)));
+      setCarbs(String(Math.round(totalCarb)));
+      setFat(String(Math.round(totalFatVal)));
+    }
+  };
 
   // Handle Photo File Upload (Camera / File picker) with client-side compression
   const handlePhotoSelect = async (file: File) => {
@@ -144,6 +160,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
       setIsAnalyzing(true);
       setAnalyzeError('');
       setAnalyzeSuccess(false);
+      setIsFoodDetected(null);
 
       // IMMEDIATELY reset old numbers so the user never sees obsolete values
       setFoodDesc('');
@@ -151,6 +168,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
       setProtein('');
       setCarbs('');
       setFat('');
+      setMealItems([]);
       setNutritionAdvice('');
       setNutritionScore(null);
       setHealthTags([]);
@@ -172,6 +190,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
     setIsAnalyzing(true);
     setAnalyzeError('');
     setAnalyzeSuccess(false);
+    setIsFoodDetected(null);
 
     try {
       const analysis = await analyzeMealPhoto({
@@ -184,18 +203,40 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
         fileName: fileTitle,
       });
 
+      if (analysis && analysis.isFood === false) {
+        setIsFoodDetected(false);
+        setAnalyzeSuccess(false);
+        setFoodDesc('');
+        setCalories('');
+        setProtein('');
+        setCarbs('');
+        setFat('');
+        setMealItems([]);
+        setNutritionAdvice('');
+        setNutritionScore(null);
+        setHealthTags([]);
+        setAnalyzeError(
+          analysis.nonFoodReason ||
+            'Hình ảnh tải lên không phải là món ăn hoặc thực phẩm. Vui lòng chụp hoặc tải lên ảnh đĩa/tô thức ăn thực tế!'
+        );
+        return;
+      }
+
       if (analysis && analysis.foodDescription) {
+        setIsFoodDetected(true);
         setFoodDesc(analysis.foodDescription);
         setCalories(analysis.estimatedCalories ? String(analysis.estimatedCalories) : '');
-        setProtein(analysis.macros?.protein ? String(analysis.macros.protein) : '');
-        setCarbs(analysis.macros?.carbs ? String(analysis.macros.carbs) : '');
-        setFat(analysis.macros?.fat ? String(analysis.macros.fat) : '');
+        setProtein(analysis.macros?.protein !== undefined ? String(analysis.macros.protein) : '');
+        setCarbs(analysis.macros?.carbs !== undefined ? String(analysis.macros.carbs) : '');
+        setFat(analysis.macros?.fat !== undefined ? String(analysis.macros.fat) : '');
+        setMealItems(Array.isArray(analysis.items) ? analysis.items : []);
         setNutritionAdvice(analysis.advice || '');
         setNutritionScore(analysis.nutritionScore || 9);
         setHealthTags(analysis.healthTags || ['AI Vision']);
         setAnalyzeSuccess(true);
       } else {
-        setAnalyzeError('Không thể phân tích bữa ăn từ ảnh này. Vui lòng chụp rõ đĩa thức ăn hơn.');
+        setIsFoodDetected(false);
+        setAnalyzeError('Không nhận diện được món ăn trong ảnh này. Vui lòng chụp rõ đĩa thức ăn hơn.');
       }
     } catch (err: any) {
       console.warn('AI meal analysis error:', err);
@@ -351,18 +392,24 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
       }
     }
 
+    if (isFoodDetected === false) {
+      setAnalyzeError('Ảnh tải lên không phải là thức ăn. Vui lòng đổi sang ảnh chụp món ăn thực tế!');
+      return;
+    }
+
     await addMealLog({
       studentId: student.id,
       date: new Date().toISOString().split('T')[0],
       mealType,
       imageUrl: lightweightImageLink,
       foodDescription: foodDesc || 'Bữa ăn được AI phân tích từ ảnh chụp',
-      estimatedCalories: parseInt(calories, 10) || 450,
+      estimatedCalories: parseInt(calories, 10) || 0,
       macros: {
-        protein: parseInt(protein, 10) || 32,
-        carbs: parseInt(carbs, 10) || 48,
-        fat: parseInt(fat, 10) || 13,
+        protein: parseInt(protein, 10) || 0,
+        carbs: parseInt(carbs, 10) || 0,
+        fat: parseInt(fat, 10) || 0,
       },
+      items: mealItems,
       driveFolderUrl: finalDriveFolderUrl,
       driveFileUrl: finalDriveFileUrl,
       aiAnalyzed: true,
@@ -377,6 +424,8 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
     setProtein('');
     setCarbs('');
     setFat('');
+    setMealItems([]);
+    setIsFoodDetected(null);
     setNutritionAdvice('');
     setAnalyzeSuccess(false);
 
@@ -759,6 +808,8 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                 setProtein('');
                 setCarbs('');
                 setFat('');
+                setMealItems([]);
+                setIsFoodDetected(null);
                 setNutritionAdvice('');
                 setNutritionScore(null);
                 setHealthTags([]);
@@ -916,17 +967,42 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                           🔥 Tổng Calo: {m.estimatedCalories} Kcal
                         </span>
                         <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800">
-                          Đạm {m.macros.protein}g
-                        </span>
-                        <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">
-                          Carb {m.macros.carbs}g
+                          Protein: {m.macros.protein}g
                         </span>
                         <span className="px-1.5 py-0.5 rounded bg-rose-100 text-rose-800">
-                          Béo {m.macros.fat}g
+                          Chất béo: {m.macros.fat}g
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">
+                          Tinh bột: {m.macros.carbs}g
                         </span>
                       </div>
                     </div>
                   </div>
+
+                  {/* Per-Item Breakdown in Saved Meal Log */}
+                  {m.items && m.items.length > 0 && (
+                    <div className="p-2.5 bg-white rounded-xl border border-slate-200/90 space-y-1.5">
+                      <div className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
+                        Chi tiết từng món trong bữa ăn:
+                      </div>
+                      <div className="divide-y divide-slate-100">
+                        {m.items.map((item, idx) => (
+                          <div key={idx} className="py-1 flex items-center justify-between text-[11px]">
+                            <div className="font-semibold text-slate-800">
+                              • {item.name}{' '}
+                              <span className="text-slate-400 font-normal">({item.portion})</span>
+                            </div>
+                            <div className="flex items-center space-x-2 text-[10px] font-bold shrink-0">
+                              <span className="text-orange-700">{item.calories} Kcal</span>
+                              <span className="text-blue-700">P: {item.protein}g</span>
+                              <span className="text-rose-700">F: {item.fat}g</span>
+                              <span className="text-amber-700">C: {item.carbs}g</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* AI Nutrition Assessment Note */}
                   {m.nutritionAdvice && (
@@ -1223,6 +1299,8 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                           setProtein('');
                           setCarbs('');
                           setFat('');
+                          setMealItems([]);
+                          setIsFoodDetected(null);
                           setNutritionAdvice('');
                           setNutritionScore(null);
                           setHealthTags([]);
@@ -1269,57 +1347,256 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                     </div>
                   )}
 
-                  {!isAnalyzing && analyzeSuccess && mealImage && (
+                  {!isAnalyzing && analyzeSuccess && isFoodDetected === true && mealImage && (
                     <div className="absolute top-2 left-2 bg-emerald-600/95 text-white backdrop-blur-xs px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center space-x-1 shadow-md">
                       <Check className="w-3 h-3" />
-                      <span>AI đã phân tích xong</span>
+                      <span>AI đã nhận diện món ăn</span>
                     </div>
                   )}
 
-                  {analyzeError && (
-                    <div className="absolute bottom-2 inset-x-2 bg-rose-600/95 text-white backdrop-blur-xs px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-center shadow-md">
-                      {analyzeError}
+                  {!isAnalyzing && isFoodDetected === false && mealImage && (
+                    <div className="absolute top-2 left-2 bg-rose-600/95 text-white backdrop-blur-xs px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center space-x-1 shadow-md">
+                      <span>⚠️ Không phải ảnh thức ăn</span>
                     </div>
                   )}
                 </div>
               </div>
 
-              {/* AI Analysis Result Panel: Shown prominently after photo upload */}
-              {(mealImage || foodDesc || calories) && (
+              {/* Non-Food Rejection Warning Banner */}
+              {!isAnalyzing && (isFoodDetected === false || analyzeError) && (
+                <div className="p-4 rounded-2xl bg-rose-50 border-2 border-rose-300 text-rose-950 space-y-1.5 shadow-xs">
+                  <div className="font-extrabold text-xs text-rose-700 flex items-center space-x-1.5">
+                    <span>⚠️ Phát Hiện Hình Ảnh Không Phải Là Món Ăn</span>
+                  </div>
+                  <p className="text-xs font-medium leading-relaxed text-rose-900">
+                    {analyzeError ||
+                      'Hình ảnh bạn vừa tải lên là bảng số liệu, tài liệu văn bản hoặc không chứa thức ăn. Hệ thống không tạo dữ liệu Calo giả cho ảnh không phải thực phẩm.'}
+                  </p>
+                  <p className="text-[11px] text-rose-700 font-bold">
+                    👉 Hãy bấm "Đổi ảnh khác" hoặc "Chụp Ảnh Thức Ăn" để chụp trực tiếp đĩa/tô món ăn của bạn.
+                  </p>
+                </div>
+              )}
+
+              {/* AI Analysis Result Panel: Shown ONLY when a valid food image is detected */}
+              {!isAnalyzing && isFoodDetected === true && (foodDesc || calories) && (
                 <div className="space-y-3 rounded-2xl bg-gradient-to-br from-emerald-50/90 via-teal-50/60 to-slate-50 p-4 border-2 border-emerald-200 shadow-xs">
-                  {/* 1. Prominent Total Calories Banner */}
-                  <div className="flex items-center justify-between bg-white p-3.5 rounded-2xl border border-orange-200 shadow-2xs">
-                    <div className="flex items-center space-x-2.5">
-                      <div className="w-10 h-10 rounded-xl bg-orange-100 text-orange-600 flex items-center justify-center shrink-0">
-                        <Flame className="w-5 h-5" />
+                  {/* 1. Prominent Total Calories & Total Macros (Protein, Fat, Carbs) */}
+                  <div className="bg-white p-3.5 rounded-2xl border border-orange-200 shadow-2xs space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2.5">
+                        <div className="w-10 h-10 rounded-xl bg-orange-100 text-orange-600 flex items-center justify-center shrink-0">
+                          <Flame className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <div className="text-[11px] font-extrabold uppercase tracking-wider text-orange-700">
+                            Tổng Năng Lượng Bữa Ăn
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            Tổng hợp từ {mealItems.length || 1} món/thành phần trong ảnh
+                          </div>
+                        </div>
                       </div>
-                      <div>
-                        <div className="text-[11px] font-extrabold uppercase tracking-wider text-orange-700">
-                          Tổng Năng Lượng Bữa Ăn (AI Tính Toán)
-                        </div>
-                        <div className="text-[11px] text-slate-500">
-                          Đạm: <strong>{protein || 0}g</strong> • Tinh bột: <strong>{carbs || 0}g</strong> • Béo: <strong>{fat || 0}g</strong>
-                        </div>
+                      <div className="text-right flex items-baseline space-x-1">
+                        <input
+                          type="number"
+                          required
+                          value={calories}
+                          onChange={(e) => setCalories(e.target.value)}
+                          className="w-20 font-black text-2xl text-orange-600 text-right bg-transparent border-b border-dashed border-orange-300 focus:outline-hidden"
+                        />
+                        <span className="font-extrabold text-xs text-orange-700">Kcal</span>
                       </div>
                     </div>
-                    <div className="text-right flex items-baseline space-x-1">
-                      <input
-                        type="number"
-                        required
-                        value={calories}
-                        onChange={(e) => setCalories(e.target.value)}
-                        className="w-20 font-black text-2xl text-orange-600 text-right bg-transparent border-b border-dashed border-orange-300 focus:outline-hidden"
-                      />
-                      <span className="font-extrabold text-xs text-orange-700">Kcal</span>
+
+                    {/* Total Protein, Fat, Carbs Inputs */}
+                    <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100 text-center">
+                      <div className="p-2 rounded-xl bg-blue-50/80 border border-blue-200">
+                        <div className="text-[10px] font-bold text-blue-700 uppercase">Tổng Protein (Đạm)</div>
+                        <div className="flex items-baseline justify-center space-x-0.5 mt-0.5">
+                          <input
+                            type="number"
+                            value={protein}
+                            onChange={(e) => setProtein(e.target.value)}
+                            className="w-12 text-center font-black text-sm text-blue-900 bg-transparent border-b border-dashed border-blue-300 focus:outline-hidden"
+                          />
+                          <span className="text-[11px] font-bold text-blue-700">g</span>
+                        </div>
+                      </div>
+
+                      <div className="p-2 rounded-xl bg-rose-50/80 border border-rose-200">
+                        <div className="text-[10px] font-bold text-rose-700 uppercase">Tổng Chất Béo (Fat)</div>
+                        <div className="flex items-baseline justify-center space-x-0.5 mt-0.5">
+                          <input
+                            type="number"
+                            value={fat}
+                            onChange={(e) => setFat(e.target.value)}
+                            className="w-12 text-center font-black text-sm text-rose-900 bg-transparent border-b border-dashed border-rose-300 focus:outline-hidden"
+                          />
+                          <span className="text-[11px] font-bold text-rose-700">g</span>
+                        </div>
+                      </div>
+
+                      <div className="p-2 rounded-xl bg-amber-50/80 border border-amber-200">
+                        <div className="text-[10px] font-bold text-amber-700 uppercase">Tổng Tinh Bột (Carb)</div>
+                        <div className="flex items-baseline justify-center space-x-0.5 mt-0.5">
+                          <input
+                            type="number"
+                            value={carbs}
+                            onChange={(e) => setCarbs(e.target.value)}
+                            className="w-12 text-center font-black text-sm text-amber-900 bg-transparent border-b border-dashed border-amber-300 focus:outline-hidden"
+                          />
+                          <span className="text-[11px] font-bold text-amber-700">g</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
 
-                  {/* 2. Detected Meal Components */}
+                  {/* 2. Per-Dish / Per-Item Calorie, Protein & Fat Breakdown */}
+                  <div className="bg-white p-3.5 rounded-xl border border-emerald-200 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-extrabold text-slate-900 text-xs flex items-center">
+                        <Utensils className="w-3.5 h-3.5 mr-1.5 text-emerald-600" />
+                        Chi Tiết Calo, Protein & Chất Béo Từng Món Trong Ảnh:
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = [
+                            ...mealItems,
+                            { name: 'Món thêm', portion: '100g', calories: 100, protein: 8, carbs: 10, fat: 3 },
+                          ];
+                          recalculateTotalsFromItems(next);
+                        }}
+                        className="text-[10px] font-bold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200 cursor-pointer"
+                      >
+                        + Thêm món
+                      </button>
+                    </div>
+
+                    <div className="space-y-2">
+                      {mealItems.map((item, idx) => (
+                        <div
+                          key={idx}
+                          className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/90 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <input
+                              type="text"
+                              value={item.name}
+                              onChange={(e) => {
+                                const copy = [...mealItems];
+                                copy[idx] = { ...copy[idx], name: e.target.value };
+                                setMealItems(copy);
+                              }}
+                              className="flex-1 font-bold text-slate-900 text-xs bg-white px-2 py-1 rounded border border-slate-200"
+                              placeholder="Tên món ăn"
+                            />
+                            <input
+                              type="text"
+                              value={item.portion}
+                              onChange={(e) => {
+                                const copy = [...mealItems];
+                                copy[idx] = { ...copy[idx], portion: e.target.value };
+                                setMealItems(copy);
+                              }}
+                              className="w-24 text-[11px] font-semibold text-slate-600 bg-white px-2 py-1 rounded border border-slate-200 text-center"
+                              placeholder="Định lượng"
+                            />
+                            {mealItems.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = mealItems.filter((_, i) => i !== idx);
+                                  recalculateTotalsFromItems(next);
+                                }}
+                                className="text-slate-400 hover:text-rose-600 px-1 font-bold cursor-pointer"
+                                title="Xóa món này"
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="grid grid-cols-4 gap-1.5 text-[10px]">
+                            <div className="bg-orange-50 border border-orange-200 rounded-lg px-2 py-1 flex items-center justify-between">
+                              <span className="font-bold text-orange-800">Calo:</span>
+                              <div className="flex items-center">
+                                <input
+                                  type="number"
+                                  value={item.calories}
+                                  onChange={(e) => {
+                                    const copy = [...mealItems];
+                                    copy[idx] = { ...copy[idx], calories: Number(e.target.value) || 0 };
+                                    recalculateTotalsFromItems(copy);
+                                  }}
+                                  className="w-11 text-right font-extrabold text-orange-700 bg-transparent focus:outline-hidden"
+                                />
+                                <span className="ml-0.5 text-orange-700 font-bold">Kcal</span>
+                              </div>
+                            </div>
+
+                            <div className="bg-blue-50 border border-blue-200 rounded-lg px-2 py-1 flex items-center justify-between">
+                              <span className="font-bold text-blue-800">Đạm:</span>
+                              <div className="flex items-center">
+                                <input
+                                  type="number"
+                                  value={item.protein}
+                                  onChange={(e) => {
+                                    const copy = [...mealItems];
+                                    copy[idx] = { ...copy[idx], protein: Number(e.target.value) || 0 };
+                                    recalculateTotalsFromItems(copy);
+                                  }}
+                                  className="w-8 text-right font-extrabold text-blue-700 bg-transparent focus:outline-hidden"
+                                />
+                                <span className="ml-0.5 text-blue-700 font-bold">g</span>
+                              </div>
+                            </div>
+
+                            <div className="bg-rose-50 border border-rose-200 rounded-lg px-2 py-1 flex items-center justify-between">
+                              <span className="font-bold text-rose-800">Béo:</span>
+                              <div className="flex items-center">
+                                <input
+                                  type="number"
+                                  value={item.fat}
+                                  onChange={(e) => {
+                                    const copy = [...mealItems];
+                                    copy[idx] = { ...copy[idx], fat: Number(e.target.value) || 0 };
+                                    recalculateTotalsFromItems(copy);
+                                  }}
+                                  className="w-8 text-right font-extrabold text-rose-700 bg-transparent focus:outline-hidden"
+                                />
+                                <span className="ml-0.5 text-rose-700 font-bold">g</span>
+                              </div>
+                            </div>
+
+                            <div className="bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 flex items-center justify-between">
+                              <span className="font-bold text-amber-800">Carb:</span>
+                              <div className="flex items-center">
+                                <input
+                                  type="number"
+                                  value={item.carbs}
+                                  onChange={(e) => {
+                                    const copy = [...mealItems];
+                                    copy[idx] = { ...copy[idx], carbs: Number(e.target.value) || 0 };
+                                    recalculateTotalsFromItems(copy);
+                                  }}
+                                  className="w-8 text-right font-extrabold text-amber-700 bg-transparent focus:outline-hidden"
+                                />
+                                <span className="ml-0.5 text-amber-700 font-bold">g</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 3. Summary Description */}
                   <div className="bg-white p-3 rounded-xl border border-slate-200/90">
                     <div className="flex items-center justify-between mb-1">
-                      <span className="font-bold text-slate-800 text-[11px] flex items-center">
-                        <Utensils className="w-3.5 h-3.5 mr-1 text-emerald-600" />
-                        Thông tin món ăn AI nhận diện từ ảnh:
+                      <span className="font-bold text-slate-800 text-[11px]">
+                        Tóm tắt bữa ăn nhận diện từ ảnh:
                       </span>
                       {nutritionScore && (
                         <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">
@@ -1336,7 +1613,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                     />
                   </div>
 
-                  {/* 3. AI Meal Improvement Suggestions & Notes */}
+                  {/* 4. AI Meal Improvement Suggestions & Notes */}
                   <div className="bg-white p-3.5 rounded-xl border border-emerald-300 shadow-2xs">
                     <div className="font-extrabold text-emerald-900 text-xs flex items-center space-x-1.5 mb-1.5">
                       <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
@@ -1348,18 +1625,6 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                       onChange={(e) => setNutritionAdvice(e.target.value)}
                       className="w-full text-xs text-emerald-950 font-medium leading-relaxed bg-emerald-50/50 p-2.5 rounded-lg border border-emerald-200 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
                     />
-                    {healthTags.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {healthTags.map((tag, idx) => (
-                          <span
-                            key={idx}
-                            className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800"
-                          >
-                            ✓ {tag}
-                          </span>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 </div>
               )}
@@ -1375,7 +1640,13 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ student }) => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isAnalyzing || isUploadingToDrive || !mealImage}
+                  disabled={
+                    isAnalyzing ||
+                    isUploadingToDrive ||
+                    !mealImage ||
+                    isFoodDetected === false ||
+                    !calories
+                  }
                   className="px-5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl font-bold shadow-md cursor-pointer disabled:opacity-50 flex items-center space-x-1.5"
                 >
                   <Check className="w-4 h-4" />
